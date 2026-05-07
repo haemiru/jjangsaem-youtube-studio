@@ -1,7 +1,24 @@
 # 짱샘 유튜브 스튜디오 — 작업 로그
 
-**최종 업데이트**: 2026-05-07 (대본 자동 생성 + 1인 설명 모드 추가)
+**최종 업데이트**: 2026-05-08
 **파이프라인**: 영상 주제 → 리서치 → 대본 → 슬라이드 → 음성 → MP4
+**배포**: https://jjangsaem-youtube-studio.vercel.app/
+**저장소**: https://github.com/haemiru/jjangsaem-youtube-studio
+
+---
+
+## 0. 오늘 한 일 요약 (2026-05-08)
+
+세션 한 번에 "주제만 입력 → 대본 생성 → 음성 합성"의 첫 끝-끝 사이클이 돌아가는 단계까지 갔다. 핵심 변경:
+
+1. **대본 자동 생성** — Claude Opus 4.7 연동, 두 모드(대화/1인 설명) 선택형으로 구현. `@anthropic-ai/sdk` 추가, `src/lib/anthropic.ts` + `src/lib/script-prompts.ts` + `/api/generate-script` 신설.
+2. **검수 분기** — `script-validator.ts` 가 모드 인자를 받아 dialogue 5장치 / solo 3장치(구어체 표지·도입·따뜻한 마무리)로 자동 분기.
+3. **Git + GitHub** — 폴더가 untracked 상태였음. `git init`, `haemiru/jjangsaem-youtube-studio` 첫 commit 후 push.
+4. **Vercel 배포** — `synthesize` 라우트에서 `mkdir`+`writeFile` 제거 (Vercel read-only FS 호환), base64만 반환. 클라이언트는 이미 base64 사용 중이라 동작 불변. `https://jjangsaem-youtube-studio.vercel.app/` 라이브.
+5. **PDF 업로드 기반 grounding** — `pdfjs-dist` 클라이언트 사이드 추출(첫 50p / 20,000자), `pdfText` 옵션으로 system prompt에 끼워넣기. 짱샘 책방 전자책(15MB+)도 처리 가능. 비용 ≈ $0.10~0.15/회. SSR 빌드 깨짐(`DOMMatrix is not defined`)은 동적 import로 해결.
+6. **UX 정리** — 대본 textarea 초기값 비우고 placeholder로 형식 안내. 모드 변경 시 샘플 자동 교체도 제거(자동 생성 버튼이 생긴 후로 혼동 유발).
+
+남은 즉시 액션은 §4 🔴 참조.
 
 ---
 
@@ -66,14 +83,14 @@
 ### UI
 - `src/app/page.tsx` — 메인 페이지
   - 1. 영상 정보 (주제 + 대본 형식: 대화/1인 + 부모 성별 + **참고 PDF 업로드** + 슬라이드 수 + 대본 생성 버튼)
-  - 2. 대본 입력 (textarea + 검수 버튼) — 모드 변경 시 샘플 자동 교체
+  - 2. 대본 입력 (textarea + 검수 버튼) — 초기값 빈 상태, placeholder로 모드별 형식 안내
   - 3. 자연스러움 검수 결과 (모드별 5장치/3장치 자동 분기)
   - 4. 음성 합성 — 전체 합성 버튼 + 라인별 진행/audio 플레이어
   - 1인 모드일 때 부모 성별 비활성화·라인 라벨 "부모(–)" 표시
   - PDF 업로드 시 추출 진행/결과(페이지 수·문자 수) 인라인 표시
-- `src/app/api/synthesize/route.ts` — POST 라우트
-  - body: `{ jobId, lineIdx, speaker, parentGender, text, style?, voiceSettings? }`
-  - Supertone 호출 → `output/<jobId>/<NNN>-<speaker>.mp3` 저장 + base64 응답
+- `src/app/api/synthesize/route.ts` — POST 라우트 (Vercel 호환)
+  - body: `{ lineIdx, speaker, parentGender, text, style?, voiceSettings?, jobId? }`
+  - Supertone 호출 → base64만 반환 (디스크 저장 제거, mp3 영구 보관은 추후 R2/S3)
   - 클라이언트는 한 줄씩 순차 호출 (실패 라인은 다른 라인에 영향 없이 계속)
 
 ---
@@ -126,6 +143,12 @@
 - `dynamic`/`dynamicParams`/`revalidate`/`fetchCache` route segment config는 Cache Components 활성 시 제거됨 → 사용 금지
 - 이 프로젝트는 포트 **3008** (3000 아님)
 - AGENTS.md 지침: 코드 작성 전 `node_modules/next/dist/docs/` 확인
+- **SSR에서 브라우저 전용 API 참조 금지** — `pdfjs-dist`는 모듈 평가 시점에 `DOMMatrix` 참조해서 빌드 깨짐. 동적 import(`await import(...)`)로 함수 안에서 로드.
+
+### Vercel 배포 제약
+- Serverless 함수는 read-only FS — `mkdir`/`writeFile` 호출하면 `EROFS`. `synthesize` 라우트에서 디스크 저장 제거함.
+- 요청 본문 4.5MB 한도 — 큰 PDF는 클라이언트에서 텍스트 추출 후 텍스트만 전송하는 패턴으로 회피.
+- 환경 변수 변경 시 재배포 필요 (Deployments → ⋯ → Redeploy).
 
 ### 개인 정보 / 브랜딩
 - "짱샘" = 25년차 아동 재활치료사 페르소나
@@ -137,8 +160,10 @@
 ## 4. 다음 할 일 (TODO)
 
 ### 🔴 즉시 (사용자 액션)
-- [ ] `.env.local` 에 `ANTHROPIC_API_KEY` 추가 → 대본 생성 동작 확인
-- [ ] 대화/1인 두 모드로 실제 대본 생성·검수·합성까지 end-to-end 한 사이클 돌려보기
+- [ ] **Vercel Environment Variables 확인** — 대시보드에서 `ANTHROPIC_API_KEY` / `SUPERTONE_API_KEY` / `GEMINI_API_KEY` 3개 모두 등록됐는지. 없으면 추가 후 재배포.
+- [ ] **로컬에도 `ANTHROPIC_API_KEY` 추가** — `.env.local` 에 한 줄, dev 서버 재시작
+- [ ] 라이브 사이트에서 end-to-end 한 사이클: 주제 입력 → 대본 생성(대화 + 1인 각각) → 검수 → 음성 합성 → 라인별 mp3 재생
+- [ ] 짱샘 책방 PDF 1개로 PDF grounding 검증 — 책 본문 표현이 대본에 살아 들어왔는지
 
 ### 🟡 짧은 작업 (음성 + 생성 보강)
 - [ ] **엄마 voice 교체 (보류 중)** — `output/_mom-candidates/` 8개 mp3 청취 후 ID·style 결정
@@ -163,9 +188,10 @@
   - 짱샘/부모 라벨에 따라 좌/우 캐릭터 토글
 
 ### 🔵 운영 / 위생
-- [ ] `.env.local` 외부 노출 점검 (이미 `.gitignore`에 `.env*` 있음, OK)
-- [ ] `output/` 도 `.gitignore`에 들어있음, OK
-- [ ] git 초기 커밋 — 이 프로젝트 폴더는 아직 한 번도 커밋된 적 없음
+- [x] `.env.local` 외부 노출 점검 (이미 `.gitignore`에 `.env*` 있음, OK)
+- [x] `output/` 도 `.gitignore`에 들어있음, OK
+- [x] git 초기 커밋 + GitHub repo (haemiru/jjangsaem-youtube-studio) 푸시
+- [x] Vercel 배포 (https://jjangsaem-youtube-studio.vercel.app/)
 - [x] Vercel 호환 — synthesize 라우트에서 디스크 저장 제거, base64만 반환 (mp3 영구 보관은 R2/S3 단계에서 다시)
 
 ---
@@ -208,5 +234,11 @@ jjangsaem-youtube-studio/
 
 ## 다시 돌아왔을 때
 
-이 문서를 처음부터 끝까지 한 번 읽고, **§4 다음 할 일** 의 🔴/🟡/🟢 순서대로 to-do를 알려주면 됨.
-첫 항목은 거의 항상 **"엄마 voice 후보 청취 + 선택"** 이고, 결정 후에야 그 아래 단계가 풀린다.
+§0(오늘 한 일)과 §4(다음 할 일)만 읽으면 컨텍스트 복원 끝. 🔴 → 🟡 → 🟢 순서.
+
+현재 첫 차단은 **"라이브 사이트 end-to-end 검증"**:
+1. Vercel env에 3개 키 다 들어갔나 확인
+2. 주제만 / PDF 포함 / 대화 / 1인 — 4가지 조합으로 한 사이클씩 돌려보기
+3. 잘 동작하면 🟡로, 어딘가 깨지면 거기부터 디버깅
+
+엄마 voice 교체는 사용자가 명시적으로 보류 (§2-2). 시간 나면 mp3 청취하면서 결정.
