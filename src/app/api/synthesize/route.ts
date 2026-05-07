@@ -1,13 +1,12 @@
-import { mkdir, writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
 import type { NextRequest } from 'next/server';
 import { synthesize, SupertoneError } from '@/lib/supertone';
 import { resolveVoiceId, type Speaker } from '@/lib/voices';
 
 export const runtime = 'nodejs';
+export const maxDuration = 60;
 
 interface SynthesizeRequestBody {
-  jobId: string;
+  jobId?: string;
   lineIdx: number;
   speaker: Speaker;
   parentGender: 'mom' | 'dad';
@@ -20,8 +19,6 @@ interface SynthesizeRequestBody {
   };
 }
 
-const JOB_ID_PATTERN = /^[A-Za-z0-9_-]{6,64}$/;
-
 export async function POST(request: NextRequest) {
   let body: SynthesizeRequestBody;
   try {
@@ -30,11 +27,8 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: 'invalid JSON body' }, { status: 400 });
   }
 
-  const { jobId, lineIdx, speaker, parentGender, text, style, voiceSettings } = body;
+  const { lineIdx, speaker, parentGender, text, style, voiceSettings } = body;
 
-  if (!jobId || !JOB_ID_PATTERN.test(jobId)) {
-    return Response.json({ error: 'invalid jobId' }, { status: 400 });
-  }
   if (typeof lineIdx !== 'number' || lineIdx < 0 || !Number.isFinite(lineIdx)) {
     return Response.json({ error: 'invalid lineIdx' }, { status: 400 });
   }
@@ -66,22 +60,12 @@ export async function POST(request: NextRequest) {
       voiceSettings,
     });
 
-    const outDir = resolve(process.cwd(), 'output', jobId);
-    await mkdir(outDir, { recursive: true });
-    const filename = `${String(lineIdx).padStart(3, '0')}-${speaker}.mp3`;
-    const filePath = resolve(outDir, filename);
-    await writeFile(filePath, result.audio);
-
-    const audioBase64 = result.audio.toString('base64');
-
     return Response.json({
-      jobId,
       lineIdx,
-      filename,
       sizeBytes: result.audio.byteLength,
       audioLengthSec: result.audioLengthSec,
       contentType: result.contentType,
-      audioBase64,
+      audioBase64: result.audio.toString('base64'),
     });
   } catch (err) {
     if (err instanceof SupertoneError) {

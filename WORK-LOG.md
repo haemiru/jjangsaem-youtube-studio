@@ -156,7 +156,7 @@
 - [ ] `.env.local` 외부 노출 점검 (이미 `.gitignore`에 `.env*` 있음, OK)
 - [ ] `output/` 도 `.gitignore`에 들어있음, OK
 - [ ] git 초기 커밋 — 이 프로젝트 폴더는 아직 한 번도 커밋된 적 없음
-- [ ] Vercel 배포는 일단 보류 (서버사이드 mp3 저장이 read-only FS와 안 맞음, 추후 R2/S3 검토)
+- [x] Vercel 호환 — synthesize 라우트에서 디스크 저장 제거, base64만 반환 (mp3 영구 보관은 R2/S3 단계에서 다시)
 
 ---
 
