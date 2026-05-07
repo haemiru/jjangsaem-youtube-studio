@@ -5,33 +5,21 @@ import { parseScript } from '@/lib/script-parser';
 import { validateScript } from '@/lib/script-validator';
 import { extractPdfText, type PdfExtractResult } from '@/lib/pdf-extract';
 
-const SAMPLE_DIALOGUE = `## 슬라이드 1
-[부모] 선생님 우리 아이가요, 막 정신없이 뛰어다니다가 갑자기 멍하니 서 있어요. 저 진짜 너무 걱정돼서 잠도 못 자요.
-[짱샘] 어머님 마음 잘 알아요. 그게 보통은요, 아이가 자기 몸을 아직 충분히 못 느껴서 그래요. 25년 동안 보면서 정말 자주 듣는 얘기예요.
-[부모] 아! 그래서였구나... 우리 아이가 자기 몸을 못 느낀다고요?
-[짱샘] 그쵸. 사실은 감각 통합이 아직 자리잡지 않아서 그래요. 어머님 잘하고 계세요.
+const PLACEHOLDER_DIALOGUE = `## 슬라이드 1
+[부모] 선생님, 우리 아이가요...
+[짱샘] 어머님 마음 잘 알아요. 그게 보통은요...
 
 ## 슬라이드 2
-[부모] 근데 선생님, 그럼 제가 뭘 해줘야 해요? 막 답답하고 속상해요.
-[짱샘] 한 가지만 더 말씀드리면요, 매일 10분씩 같이 천천히 걷는 것만 해도 큰 도움이 돼요.
-[부모] 진짜요? 우리 아이가 딱 그래요, 가만히 못 있고. 아! 그게 그 이유였어요?
-[짱샘] 알고 보면 단순한 거예요. 어머님 너무 자책하지 마세요. 그럴 수 있어요.
-`;
+[부모] 그럼 제가 뭘 해줘야 해요?
+[짱샘] 한 가지만 기억하시면 돼요.`;
 
-const SAMPLE_SOLO = `## 슬라이드 1
-[짱샘] 어머님들, 오늘은 자폐 아이의 잠 못 드는 밤 얘기를 해볼게요.
-[짱샘] 25년 동안 정말 자주 들은 고민이거든요.
+const PLACEHOLDER_SOLO = `## 슬라이드 1
+[짱샘] 어머님들, 오늘은 ... 얘기를 해볼게요.
 [짱샘] 한 가지만 기억하시면 됩니다.
 
 ## 슬라이드 2
-[짱샘] 그게 보통은요, 아이가 자기 몸을 충분히 못 느껴서 그래요.
-[짱샘] 감각 통합이 아직 자리잡지 않은 거예요.
-[짱샘] 어렵게 들리지만, 사실은 단순합니다.
-
-## 슬라이드 3
-[짱샘] 어머님 너무 자책하지 마세요.
-[짱샘] 잘하고 계세요. 그럴 수 있어요.
-`;
+[짱샘] 그게 보통은요...
+[짱샘] 어머님 잘하고 계세요.`;
 
 type ParentGender = 'mom' | 'dad';
 type ScriptMode = 'dialogue' | 'solo';
@@ -57,7 +45,7 @@ export default function Home() {
   const [mode, setMode] = useState<ScriptMode>('dialogue');
   const [parentGender, setParentGender] = useState<ParentGender>('mom');
   const [slideCount, setSlideCount] = useState(6);
-  const [script, setScript] = useState(SAMPLE_DIALOGUE);
+  const [script, setScript] = useState('');
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState<string | null>(null);
   const [pdfFileName, setPdfFileName] = useState<string | null>(null);
@@ -77,7 +65,6 @@ export default function Home() {
   function handleModeChange(next: ScriptMode) {
     setMode(next);
     setValidateOn(false);
-    setScript(next === 'solo' ? SAMPLE_SOLO : SAMPLE_DIALOGUE);
   }
 
   async function handlePdfChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -354,7 +341,8 @@ export default function Home() {
           value={script}
           onChange={(e) => setScript(e.target.value)}
           rows={18}
-          className="w-full rounded border border-zinc-300 dark:border-zinc-700 bg-transparent px-3 py-2 font-mono text-sm leading-6"
+          placeholder={`주제 입력 후 위의 "대본 생성" 버튼을 누르면 여기에 자동으로 채워집니다. 직접 입력해도 됩니다.\n\n형식 예시:\n${mode === 'solo' ? PLACEHOLDER_SOLO : PLACEHOLDER_DIALOGUE}`}
+          className="w-full rounded border border-zinc-300 dark:border-zinc-700 bg-transparent px-3 py-2 font-mono text-sm leading-6 placeholder:text-zinc-400 dark:placeholder:text-zinc-600"
         />
         <div className="mt-3 flex items-center gap-3">
           <button
