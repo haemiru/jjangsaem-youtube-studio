@@ -33,8 +33,17 @@
   - 짱샘 페르소나, 리듬 규칙, 형식 규칙 공통
   - dialogue: 부모↔짱샘, 자연스러움 5장치 명시
   - solo: 짱샘 단독, 1인 전용 3장치 (구어체 표지 / 도입 / 따뜻한 마무리)
-- `src/app/api/generate-script/route.ts` — POST `{ topic, mode, parentGender?, slideCount }` → `{ script }`
+  - PDF 업로드 시 "참고 자료 (책 발췌)" 섹션 자동 삽입
+- `src/app/api/generate-script/route.ts` — POST `{ topic, mode, parentGender?, slideCount, pdfText? }` → `{ script, usedPdf }`
 - ⚠️ `ANTHROPIC_API_KEY` 는 `.env.local` 에 사용자가 직접 추가해야 동작
+
+### PDF 업로드 → 대본 grounding (NEW)
+- `pdfjs-dist` 클라이언트 사이드 추출 (jjangsaem-youtube 프로젝트 패턴 차용)
+- `src/lib/pdf-extract.ts` — 첫 50p / 20,000자까지 추출 (동적 import로 SSR 회피)
+  - worker는 `unpkg.com/pdfjs-dist@<version>/build/pdf.worker.min.mjs` CDN 사용
+- 책 PDF 업로드 → 클라이언트에서 텍스트 추출 → API에 `pdfText` 전송 → Claude system prompt에 끼워넣음
+- 짱샘 책방 전자책(15MB+) 도 첫 50p만 추출하므로 Vercel 4.5MB body 제한 무관
+- 비용: 20K자 ≈ ~10K 입력 토큰 → Opus 한 번 ≈ $0.10~0.15
 
 ### 대본
 - `src/lib/script-parser.ts` — 마크다운 대본 파서
@@ -56,11 +65,12 @@
 
 ### UI
 - `src/app/page.tsx` — 메인 페이지
-  - 1. 영상 정보 (주제 + **대본 형식: 대화/1인** + 부모 성별 + 슬라이드 수 + **대본 생성 버튼**)
+  - 1. 영상 정보 (주제 + 대본 형식: 대화/1인 + 부모 성별 + **참고 PDF 업로드** + 슬라이드 수 + 대본 생성 버튼)
   - 2. 대본 입력 (textarea + 검수 버튼) — 모드 변경 시 샘플 자동 교체
   - 3. 자연스러움 검수 결과 (모드별 5장치/3장치 자동 분기)
   - 4. 음성 합성 — 전체 합성 버튼 + 라인별 진행/audio 플레이어
   - 1인 모드일 때 부모 성별 비활성화·라인 라벨 "부모(–)" 표시
+  - PDF 업로드 시 추출 진행/결과(페이지 수·문자 수) 인라인 표시
 - `src/app/api/synthesize/route.ts` — POST 라우트
   - body: `{ jobId, lineIdx, speaker, parentGender, text, style?, voiceSettings? }`
   - Supertone 호출 → `output/<jobId>/<NNN>-<speaker>.mp3` 저장 + base64 응답
@@ -183,7 +193,8 @@ jjangsaem-youtube-studio/
 │   │       └── synthesize/route.ts       # 라인별 TTS POST
 │   └── lib/
 │       ├── anthropic.ts               # Claude SDK 래퍼
-│       ├── script-prompts.ts          # dialogue / solo 프롬프트 빌더
+│       ├── script-prompts.ts          # dialogue / solo 프롬프트 빌더 (+ PDF 컨텍스트)
+│       ├── pdf-extract.ts             # 클라이언트 PDF 텍스트 추출 (50p, 20K자)
 │       ├── supertone.ts               # Supertone REST 클라이언트
 │       ├── voices.ts                  # 화자 → voice ID 매핑
 │       ├── script-parser.ts           # 마크다운 대본 파서

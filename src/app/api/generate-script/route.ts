@@ -10,7 +10,10 @@ interface GenerateScriptBody {
   mode: ScriptMode;
   parentGender?: ParentGender;
   slideCount?: number;
+  pdfText?: string;
 }
+
+const PDF_TEXT_LIMIT = 25_000;
 
 export async function POST(request: NextRequest) {
   let body: GenerateScriptBody;
@@ -24,6 +27,10 @@ export async function POST(request: NextRequest) {
   const mode = body.mode;
   const parentGender = body.parentGender;
   const slideCount = body.slideCount ?? 6;
+  const pdfText =
+    typeof body.pdfText === 'string' && body.pdfText.trim()
+      ? body.pdfText.slice(0, PDF_TEXT_LIMIT)
+      : undefined;
 
   if (!topic) {
     return Response.json({ error: '주제(topic)가 비어있습니다' }, { status: 400 });
@@ -42,9 +49,9 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const { system, user } = buildPrompt({ topic, mode, parentGender, slideCount });
+    const { system, user } = buildPrompt({ topic, mode, parentGender, slideCount, pdfText });
     const script = await generate({ system, user, maxTokens: 4096, temperature: 0.9 });
-    return Response.json({ script, mode, slideCount });
+    return Response.json({ script, mode, slideCount, usedPdf: Boolean(pdfText) });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return Response.json({ error: 'generate_failed', message }, { status: 500 });

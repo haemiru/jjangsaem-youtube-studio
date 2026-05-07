@@ -6,6 +6,7 @@ export interface PromptInput {
   mode: ScriptMode;
   parentGender?: ParentGender;
   slideCount: number;
+  pdfText?: string;
 }
 
 const PERSONA = `짱샘 페르소나:
@@ -42,8 +43,23 @@ function soloDevices(): string {
 3. 따뜻한 마무리 — 마지막 슬라이드에 "어머님/아버님/괜찮/잘하고 계세요/마음" 같은 다독임 표현을 최소 한 번 넣는다`;
 }
 
+function referenceBlock(pdfText?: string): string {
+  if (!pdfText || !pdfText.trim()) return '';
+  return [
+    '',
+    '참고 자료 (책 발췌):',
+    '아래는 사용자가 제공한 책의 본문 일부입니다. 이 자료의 톤·논리·실제 사례를 활용해 대본을 작성하되,',
+    '책에 없는 내용을 만들어내지 말고, 책의 표현을 짱샘 화법으로 자연스럽게 변환하세요.',
+    '책에 사용된 어휘·비유·강조 포인트를 우선적으로 살리고, 주제는 책 안에서 좁히는 각도로만 사용하세요.',
+    '---',
+    pdfText.trim(),
+    '---',
+  ].join('\n');
+}
+
 export function buildPrompt(input: PromptInput): { system: string; user: string } {
-  const { topic, mode, parentGender, slideCount } = input;
+  const { topic, mode, parentGender, slideCount, pdfText } = input;
+  const reference = referenceBlock(pdfText);
 
   if (mode === 'dialogue') {
     const parentLabel = parentGender === 'dad' ? '아빠' : '엄마';
@@ -70,10 +86,12 @@ export function buildPrompt(input: PromptInput): { system: string; user: string 
       `주제: ${topic}`,
       `슬라이드 수: ${slideCount}개`,
       `호스트(부모) 화자: ${parentLabel}`,
+      reference,
       '',
       `위 페르소나·리듬·5장치·형식 규칙을 모두 만족하는 ${slideCount}개 슬라이드 분량의 대본을 작성하세요.`,
+      reference ? '책 발췌가 있으면 그 내용을 1차 자료로 삼고, 주제는 그 안에서 영상 1편을 좁히는 각도로 사용하세요.' : '',
       '마크다운만 출력하고 다른 설명은 절대 추가하지 마세요.',
-    ].join('\n');
+    ].filter(Boolean).join('\n');
 
     return { system, user };
   }
@@ -113,11 +131,13 @@ export function buildPrompt(input: PromptInput): { system: string; user: string 
   const user = [
     `주제: ${topic}`,
     `슬라이드 수: ${slideCount}개`,
+    reference,
     '',
     `위 페르소나·리듬·3장치·형식 규칙을 모두 만족하는 ${slideCount}개 슬라이드 분량의 1인 설명 대본을 작성하세요.`,
     '[부모] 라벨은 절대 사용하지 마세요. 모든 라인은 [짱샘] 입니다.',
+    reference ? '책 발췌가 있으면 그 내용을 1차 자료로 삼고, 주제는 그 안에서 영상 1편을 좁히는 각도로 사용하세요.' : '',
     '마크다운만 출력하고 다른 설명은 절대 추가하지 마세요.',
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 
   return { system, user };
 }

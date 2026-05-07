@@ -3,6 +3,7 @@
 import { useMemo, useRef, useState } from 'react';
 import { parseScript } from '@/lib/script-parser';
 import { validateScript } from '@/lib/script-validator';
+import { extractPdfText, type PdfExtractResult } from '@/lib/pdf-extract';
 
 const SAMPLE_DIALOGUE = `## 슬라이드 1
 [부모] 선생님 우리 아이가요, 막 정신없이 뛰어다니다가 갑자기 멍하니 서 있어요. 저 진짜 너무 걱정돼서 잠도 못 자요.
@@ -59,6 +60,10 @@ export default function Home() {
   const [script, setScript] = useState(SAMPLE_DIALOGUE);
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState<string | null>(null);
+  const [pdfFileName, setPdfFileName] = useState<string | null>(null);
+  const [pdfExtract, setPdfExtract] = useState<PdfExtractResult | null>(null);
+  const [extractingPdf, setExtractingPdf] = useState(false);
+  const [pdfError, setPdfError] = useState<string | null>(null);
   const [validateOn, setValidateOn] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [audioByLine, setAudioByLine] = useState<Record<number, LineAudio>>({});
@@ -75,6 +80,30 @@ export default function Home() {
     setScript(next === 'solo' ? SAMPLE_SOLO : SAMPLE_DIALOGUE);
   }
 
+  async function handlePdfChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setPdfError(null);
+    setPdfExtract(null);
+    setPdfFileName(file.name);
+    setExtractingPdf(true);
+    try {
+      const result = await extractPdfText(file);
+      setPdfExtract(result);
+    } catch (err) {
+      setPdfError(err instanceof Error ? err.message : String(err));
+      setPdfFileName(null);
+    } finally {
+      setExtractingPdf(false);
+    }
+  }
+
+  function handleClearPdf() {
+    setPdfFileName(null);
+    setPdfExtract(null);
+    setPdfError(null);
+  }
+
   async function handleGenerate() {
     if (!topic.trim() || generating) return;
     setGenError(null);
@@ -89,6 +118,7 @@ export default function Home() {
           mode,
           parentGender: mode === 'dialogue' ? parentGender : undefined,
           slideCount,
+          pdfText: pdfExtract?.text,
         }),
       });
       const data = await res.json();
@@ -242,6 +272,47 @@ export default function Home() {
           </label>
         </div>
 
+        <div className="mt-4 rounded border border-dashed border-zinc-300 dark:border-zinc-700 p-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <span className="text-xs font-medium">참고 PDF (선택) — 짱샘 책방 전자책</span>
+              <p className="mt-0.5 text-[11px] text-zinc-500">
+                업로드하면 책 본문을 1차 자료로 삼아 대본 생성. 첫 50페이지 / 20,000자까지 추출.
+              </p>
+            </div>
+            {pdfFileName && (
+              <button
+                onClick={handleClearPdf}
+                className="text-xs text-zinc-500 underline hover:text-zinc-700 dark:hover:text-zinc-300"
+              >
+                제거
+              </button>
+            )}
+          </div>
+          <input
+            type="file"
+            accept="application/pdf"
+            onChange={handlePdfChange}
+            disabled={extractingPdf}
+            className="mt-2 block w-full text-xs file:mr-3 file:rounded file:border-0 file:bg-zinc-100 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-zinc-700 hover:file:bg-zinc-200 dark:file:bg-zinc-800 dark:file:text-zinc-200 dark:hover:file:bg-zinc-700"
+          />
+          {extractingPdf && (
+            <p className="mt-2 text-xs text-blue-600 dark:text-blue-400">
+              PDF 텍스트 추출 중...
+            </p>
+          )}
+          {pdfError && (
+            <p className="mt-2 text-xs text-red-600 dark:text-red-400">{pdfError}</p>
+          )}
+          {pdfExtract && pdfFileName && (
+            <p className="mt-2 text-xs text-green-700 dark:text-green-400">
+              ✓ {pdfFileName} — {pdfExtract.extractedPages}/{pdfExtract.totalPages}페이지,{' '}
+              {pdfExtract.text.length.toLocaleString()}자 추출
+              {pdfExtract.truncated && ' (잘림)'}
+            </p>
+          )}
+        </div>
+
         <div className="mt-3 flex items-center gap-3">
           <label className="text-xs font-medium">슬라이드 수</label>
           <input
@@ -254,10 +325,14 @@ export default function Home() {
           />
           <button
             onClick={handleGenerate}
-            disabled={!topic.trim() || generating}
+            disabled={!topic.trim() || generating || extractingPdf}
             className="ml-auto rounded bg-violet-600 px-4 py-2 text-sm text-white hover:bg-violet-500 disabled:bg-zinc-400 disabled:cursor-not-allowed"
           >
-            {generating ? 'Claude 생성 중...' : '대본 생성 (Claude Opus 4.7)'}
+            {generating
+              ? 'Claude 생성 중...'
+              : pdfExtract
+                ? '대본 생성 (PDF 기반)'
+                : '대본 생성 (Claude Opus 4.7)'}
           </button>
         </div>
 
