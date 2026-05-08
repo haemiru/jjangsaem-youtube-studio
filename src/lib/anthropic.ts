@@ -16,6 +16,7 @@ export interface GenerateOptions {
   system: string;
   user: string;
   maxTokens?: number;
+  /** @deprecated Opus 4.7부터 미지원 — 전달해도 무시된다 */
   temperature?: number;
 }
 
@@ -24,7 +25,6 @@ export async function generate(opts: GenerateOptions): Promise<string> {
   const res = await client.messages.create({
     model: CLAUDE_MODEL,
     max_tokens: opts.maxTokens ?? 4096,
-    temperature: opts.temperature ?? 0.9,
     system: opts.system,
     messages: [{ role: 'user', content: opts.user }],
   });
