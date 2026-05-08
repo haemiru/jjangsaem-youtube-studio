@@ -7,15 +7,22 @@
     "build": "next build",
     "start": "next start -p 3008",
     "lint": "eslint",
-    "tts:test": "tsx scripts/tts-test.ts"
+    "tts:test": "tsx scripts/tts-test.ts",
+    "remotion:studio": "remotion studio",
+    "remotion:render": "remotion render SlideShow out/slideshow.mp4"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.95.0",
+    "@remotion/bundler": "^4.0.458",
+    "@remotion/cli": "^4.0.458",
+    "@remotion/player": "^4.0.458",
+    "@remotion/renderer": "^4.0.458",
     "dotenv": "^17.4.2",
     "next": "16.2.5",
     "pdfjs-dist": "^5.7.284",
     "react": "19.2.4",
     "react-dom": "19.2.4",
+    "remotion": "^4.0.458",
     "tsx": "^4.21.0"
   },
   "devDependencies": {

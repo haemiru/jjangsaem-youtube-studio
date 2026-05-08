@@ -11,9 +11,11 @@ interface GenerateScriptBody {
   parentGender?: ParentGender;
   slideCount?: number;
   pdfText?: string;
+  research?: string;
 }
 
 const PDF_TEXT_LIMIT = 25_000;
+const RESEARCH_TEXT_LIMIT = 15_000;
 
 export async function POST(request: NextRequest) {
   let body: GenerateScriptBody;
@@ -30,6 +32,10 @@ export async function POST(request: NextRequest) {
   const pdfText =
     typeof body.pdfText === 'string' && body.pdfText.trim()
       ? body.pdfText.slice(0, PDF_TEXT_LIMIT)
+      : undefined;
+  const research =
+    typeof body.research === 'string' && body.research.trim()
+      ? body.research.slice(0, RESEARCH_TEXT_LIMIT)
       : undefined;
 
   if (!topic) {
@@ -49,9 +55,22 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const { system, user } = buildPrompt({ topic, mode, parentGender, slideCount, pdfText });
+    const { system, user } = buildPrompt({
+      topic,
+      mode,
+      parentGender,
+      slideCount,
+      pdfText,
+      research,
+    });
     const script = await generate({ system, user, maxTokens: 4096, temperature: 0.9 });
-    return Response.json({ script, mode, slideCount, usedPdf: Boolean(pdfText) });
+    return Response.json({
+      script,
+      mode,
+      slideCount,
+      usedPdf: Boolean(pdfText),
+      usedResearch: Boolean(research),
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return Response.json({ error: 'generate_failed', message }, { status: 500 });

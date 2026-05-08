@@ -7,6 +7,7 @@ export interface PromptInput {
   parentGender?: ParentGender;
   slideCount: number;
   pdfText?: string;
+  research?: string;
 }
 
 const PERSONA = `짱샘 페르소나:
@@ -57,9 +58,26 @@ function referenceBlock(pdfText?: string): string {
   ].join('\n');
 }
 
+function researchBlock(research?: string): string {
+  if (!research || !research.trim()) return '';
+  return [
+    '',
+    '리서치 결과 (NotebookLM):',
+    '아래는 짱샘님이 보유한 노트북(책·자료)에서 추출한 이번 주제 관련 정리입니다.',
+    '이 정리에 나온 핵심 메시지·실천법·표현·비유를 1차 자료로 삼아 대본을 구성하세요.',
+    '리서치에 없는 사실(통계·연구·일반 의학 상식)을 임의로 만들어내지 마세요.',
+    '"자료에 없음"으로 표시된 항목은 대본에서 단정적으로 다루지 말고, 짱샘 화법의 일반적 다독임으로 대체하세요.',
+    '---',
+    research.trim(),
+    '---',
+  ].join('\n');
+}
+
 export function buildPrompt(input: PromptInput): { system: string; user: string } {
-  const { topic, mode, parentGender, slideCount, pdfText } = input;
+  const { topic, mode, parentGender, slideCount, pdfText, research } = input;
   const reference = referenceBlock(pdfText);
+  const researchCtx = researchBlock(research);
+  const hasGrounding = Boolean(reference || researchCtx);
 
   if (mode === 'dialogue') {
     const parentLabel = parentGender === 'dad' ? '아빠' : '엄마';
@@ -86,10 +104,13 @@ export function buildPrompt(input: PromptInput): { system: string; user: string 
       `주제: ${topic}`,
       `슬라이드 수: ${slideCount}개`,
       `호스트(부모) 화자: ${parentLabel}`,
+      researchCtx,
       reference,
       '',
       `위 페르소나·리듬·5장치·형식 규칙을 모두 만족하는 ${slideCount}개 슬라이드 분량의 대본을 작성하세요.`,
-      reference ? '책 발췌가 있으면 그 내용을 1차 자료로 삼고, 주제는 그 안에서 영상 1편을 좁히는 각도로 사용하세요.' : '',
+      hasGrounding
+        ? '리서치 결과·책 발췌가 있으면 그 내용을 1차 자료로 삼고, 주제는 그 안에서 영상 1편을 좁히는 각도로 사용하세요. 자료에 없는 사실을 만들어내지 마세요.'
+        : '',
       '마크다운만 출력하고 다른 설명은 절대 추가하지 마세요.',
     ].filter(Boolean).join('\n');
 
@@ -131,11 +152,14 @@ export function buildPrompt(input: PromptInput): { system: string; user: string 
   const user = [
     `주제: ${topic}`,
     `슬라이드 수: ${slideCount}개`,
+    researchCtx,
     reference,
     '',
     `위 페르소나·리듬·3장치·형식 규칙을 모두 만족하는 ${slideCount}개 슬라이드 분량의 1인 설명 대본을 작성하세요.`,
     '[부모] 라벨은 절대 사용하지 마세요. 모든 라인은 [짱샘] 입니다.',
-    reference ? '책 발췌가 있으면 그 내용을 1차 자료로 삼고, 주제는 그 안에서 영상 1편을 좁히는 각도로 사용하세요.' : '',
+    hasGrounding
+      ? '리서치 결과·책 발췌가 있으면 그 내용을 1차 자료로 삼고, 주제는 그 안에서 영상 1편을 좁히는 각도로 사용하세요. 자료에 없는 사실을 만들어내지 마세요.'
+      : '',
     '마크다운만 출력하고 다른 설명은 절대 추가하지 마세요.',
   ].filter(Boolean).join('\n');
 

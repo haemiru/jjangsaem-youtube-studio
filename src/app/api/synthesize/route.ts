@@ -1,4 +1,6 @@
 import type { NextRequest } from 'next/server';
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { synthesize, SupertoneError } from '@/lib/supertone';
 import { resolveVoiceId, type Speaker } from '@/lib/voices';
 
@@ -19,6 +21,8 @@ interface SynthesizeRequestBody {
   };
 }
 
+const SAFE_JOB_ID = /^[A-Za-z0-9_-]+$/;
+
 export async function POST(request: NextRequest) {
   let body: SynthesizeRequestBody;
   try {
@@ -27,7 +31,7 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: 'invalid JSON body' }, { status: 400 });
   }
 
-  const { lineIdx, speaker, parentGender, text, style, voiceSettings } = body;
+  const { jobId, lineIdx, speaker, parentGender, text, style, voiceSettings } = body;
 
   if (typeof lineIdx !== 'number' || lineIdx < 0 || !Number.isFinite(lineIdx)) {
     return Response.json({ error: 'invalid lineIdx' }, { status: 400 });
@@ -47,6 +51,9 @@ export async function POST(request: NextRequest) {
       { status: 400 }
     );
   }
+  if (jobId && !SAFE_JOB_ID.test(jobId)) {
+    return Response.json({ error: 'invalid jobId' }, { status: 400 });
+  }
 
   const voiceId = resolveVoiceId(speaker, parentGender);
 
@@ -60,12 +67,23 @@ export async function POST(request: NextRequest) {
       voiceSettings,
     });
 
+    let audioUrl: string | null = null;
+    if (jobId) {
+      const fileName = `line-${String(lineIdx).padStart(3, '0')}.mp3`;
+      const dir = path.join(process.cwd(), 'public', 'audio', jobId);
+      await mkdir(dir, { recursive: true });
+      await writeFile(path.join(dir, fileName), result.audio);
+      audioUrl = `/audio/${jobId}/${fileName}`;
+    }
+
     return Response.json({
       lineIdx,
+      jobId: jobId ?? null,
       sizeBytes: result.audio.byteLength,
       audioLengthSec: result.audioLengthSec,
       contentType: result.contentType,
       audioBase64: result.audio.toString('base64'),
+      audioUrl,
     });
   } catch (err) {
     if (err instanceof SupertoneError) {
