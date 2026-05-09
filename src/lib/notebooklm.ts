@@ -236,6 +236,76 @@ export async function createSlideDeck(
   return runNlm(args, { timeoutMs: (timeoutSec + 30) * 1000 });
 }
 
+interface ArtifactInfo {
+  id: string;
+  type: string;
+  status: string; // 'in_progress' | 'ready' | 'complete' | 'failed' | ...
+  raw: Record<string, unknown>;
+}
+
+export async function listArtifacts(notebookId: string): Promise<ArtifactInfo[]> {
+  const stdout = await runNlm(['status', 'artifacts', notebookId, '--json'], {
+    timeoutMs: 30_000,
+  });
+  const parsed = tryParseJson(stdout);
+  const arr = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray((parsed as { artifacts?: unknown }).artifacts)
+      ? ((parsed as { artifacts: unknown[] }).artifacts)
+      : null;
+  if (!arr) return [];
+  return arr.map((x) => {
+    const obj = (x ?? {}) as Record<string, unknown>;
+    return {
+      id: String(obj.id ?? ''),
+      type: String(obj.type ?? ''),
+      status: String(obj.status ?? ''),
+      raw: obj,
+    };
+  });
+}
+
+/**
+ * 슬라이드 덱 artifact가 ready 상태가 될 때까지 폴링.
+ * `slides create` 직후엔 status === 'in_progress' 라 즉시 download 시도하면 실패.
+ */
+export async function waitForSlideDeckReady(
+  notebookId: string,
+  options: { timeoutSec?: number; pollIntervalMs?: number } = {}
+): Promise<ArtifactInfo> {
+  const timeoutSec = options.timeoutSec ?? 480;
+  const pollIntervalMs = options.pollIntervalMs ?? 5_000;
+  const deadline = Date.now() + timeoutSec * 1000;
+
+  let lastStatus = '';
+  while (Date.now() < deadline) {
+    const arts = await listArtifacts(notebookId);
+    // 가장 최근 slide_deck artifact를 본다 (배열 끝)
+    const slideDecks = arts.filter((a) => a.type === 'slide_deck');
+    const latest = slideDecks[slideDecks.length - 1];
+    if (latest) {
+      lastStatus = latest.status;
+      const ok = ['ready', 'complete', 'completed', 'success'].includes(
+        latest.status.toLowerCase()
+      );
+      const failed = ['failed', 'error'].includes(latest.status.toLowerCase());
+      if (ok) return latest;
+      if (failed) {
+        throw new NotebookLMError(
+          'cli_error',
+          `슬라이드 덱 생성 실패: status=${latest.status}`,
+          { stdout: JSON.stringify(latest.raw).slice(0, 500) }
+        );
+      }
+    }
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
+  }
+  throw new NotebookLMError(
+    'timeout',
+    `슬라이드 덱이 ${timeoutSec}s 안에 ready가 되지 않음 (마지막 상태: ${lastStatus || 'unknown'})`
+  );
+}
+
 export async function downloadSlideDeck(
   notebookId: string,
   outputPath: string,

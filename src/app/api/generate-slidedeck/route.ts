@@ -4,6 +4,7 @@ import path from 'node:path';
 import {
   createSlideDeck,
   downloadSlideDeck,
+  waitForSlideDeckReady,
   NotebookLMError,
 } from '@/lib/notebooklm';
 import { convertPdfToPngs } from '@/lib/pdf-to-png';
@@ -53,20 +54,23 @@ export async function POST(request: NextRequest) {
     await mkdir(slidesDir, { recursive: true });
 
     if (create) {
-      // 1. NotebookLM에서 슬라이드 덱 생성 (서버 측에서 비동기 작업이 끝날 때까지 대기)
+      // 1. NotebookLM 슬라이드 덱 생성 작업 시작 (CLI는 즉시 반환)
       await createSlideDeck(notebookId, {
         format: 'detailed_deck',
         length,
         language,
         focus,
-        timeoutSec: 360,
+        timeoutSec: 60,
       });
     }
 
-    // 2. PDF로 다운로드
+    // 2. 슬라이드 덱 artifact가 ready 상태가 될 때까지 폴링
+    await waitForSlideDeckReady(notebookId, { timeoutSec: 480, pollIntervalMs: 5000 });
+
+    // 3. PDF로 다운로드
     await downloadSlideDeck(notebookId, pdfPath, { format: 'pdf', timeoutSec: 180 });
 
-    // 3. 페이지별 PNG로 변환
+    // 4. 페이지별 PNG로 변환
     const result = await convertPdfToPngs({
       pdfPath,
       outDir: slidesDir,
@@ -74,7 +78,7 @@ export async function POST(request: NextRequest) {
       filenamePrefix: 'slide',
     });
 
-    // 4. 응답에는 브라우저에서 접근 가능한 상대 URL로 변환
+    // 5. 응답에는 브라우저에서 접근 가능한 상대 URL로 변환
     const slides = result.outputs.map((o) => ({
       index: o.index,
       url: `/slides/${jobId}/${path.basename(o.pngPath)}`,
