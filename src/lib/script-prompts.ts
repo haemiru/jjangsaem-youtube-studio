@@ -5,7 +5,7 @@ export interface PromptInput {
   topic: string;
   mode: ScriptMode;
   parentGender?: ParentGender;
-  slideCount: number;
+  targetMinutes: number;
   pdfText?: string;
   research?: string;
 }
@@ -73,11 +73,25 @@ function researchBlock(research?: string): string {
   ].join('\n');
 }
 
+function lengthGuidance(targetMinutes: number): string {
+  // Korean TTS ≈ 3.8자/sec. 1 line ≈ 50~70자 ≈ 13~18초. 1 slide ≈ 3~4 lines ≈ 45~60초.
+  // Provide a hint range, but let the model decide the exact count.
+  const totalSec = targetMinutes * 60;
+  const estLow = Math.max(3, Math.round(totalSec / 60));
+  const estHigh = Math.max(estLow + 1, Math.round(totalSec / 45));
+  return [
+    `목표 영상 길이: 약 ${targetMinutes}분 (한국어 TTS 기준)`,
+    `슬라이드 수는 직접 결정하세요. 권장 범위는 ${estLow}~${estHigh}장입니다 (한 슬라이드 약 45~60초 분량).`,
+    '한 슬라이드는 2~5개 라인으로 호흡을 만들고, 슬라이드별 분량을 비슷하게 맞춰 전체가 목표 길이에 수렴하도록 구성하세요.',
+  ].join('\n');
+}
+
 export function buildPrompt(input: PromptInput): { system: string; user: string } {
-  const { topic, mode, parentGender, slideCount, pdfText, research } = input;
+  const { topic, mode, parentGender, targetMinutes, pdfText, research } = input;
   const reference = referenceBlock(pdfText);
   const researchCtx = researchBlock(research);
   const hasGrounding = Boolean(reference || researchCtx);
+  const lengthHint = lengthGuidance(targetMinutes);
 
   if (mode === 'dialogue') {
     const parentLabel = parentGender === 'dad' ? '아빠' : '엄마';
@@ -102,12 +116,12 @@ export function buildPrompt(input: PromptInput): { system: string; user: string 
 
     const user = [
       `주제: ${topic}`,
-      `슬라이드 수: ${slideCount}개`,
+      lengthHint,
       `호스트(부모) 화자: ${parentLabel}`,
       researchCtx,
       reference,
       '',
-      `위 페르소나·리듬·5장치·형식 규칙을 모두 만족하는 ${slideCount}개 슬라이드 분량의 대본을 작성하세요.`,
+      '위 페르소나·리듬·5장치·형식 규칙을 모두 만족하는 대본을 작성하세요.',
       hasGrounding
         ? '리서치 결과·책 발췌가 있으면 그 내용을 1차 자료로 삼고, 주제는 그 안에서 영상 1편을 좁히는 각도로 사용하세요. 자료에 없는 사실을 만들어내지 마세요.'
         : '',
@@ -151,11 +165,11 @@ export function buildPrompt(input: PromptInput): { system: string; user: string 
 
   const user = [
     `주제: ${topic}`,
-    `슬라이드 수: ${slideCount}개`,
+    lengthHint,
     researchCtx,
     reference,
     '',
-    `위 페르소나·리듬·3장치·형식 규칙을 모두 만족하는 ${slideCount}개 슬라이드 분량의 1인 설명 대본을 작성하세요.`,
+    '위 페르소나·리듬·3장치·형식 규칙을 모두 만족하는 1인 설명 대본을 작성하세요.',
     '[부모] 라벨은 절대 사용하지 마세요. 모든 라인은 [짱샘] 입니다.',
     hasGrounding
       ? '리서치 결과·책 발췌가 있으면 그 내용을 1차 자료로 삼고, 주제는 그 안에서 영상 1편을 좁히는 각도로 사용하세요. 자료에 없는 사실을 만들어내지 마세요.'

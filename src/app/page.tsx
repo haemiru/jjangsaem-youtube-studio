@@ -4,8 +4,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { parseScript } from '@/lib/script-parser';
 import { validateScript } from '@/lib/script-validator';
 import { extractPdfText, type PdfExtractResult } from '@/lib/pdf-extract';
-import { SlidePlayer } from '@/components/SlidePlayer';
-import type { AudioLine, Deck } from '../../remotion/types';
+import { buildPrompt as buildScriptPrompt } from '@/lib/script-prompts';
+import { GEMINI_VOICES, GEMINI_DEFAULT_VOICE } from '@/lib/gemini-voices';
+
+type TTSProvider = 'supertone' | 'gemini';
+
+const LS_GEMINI_KEY = 'jjangsaem.gemini.apiKey';
+const LS_GEMINI_VOICES = 'jjangsaem.gemini.voices';
+const LS_TTS_PROVIDER = 'jjangsaem.tts.provider';
 
 interface NotebookOption {
   id: string;
@@ -42,23 +48,6 @@ interface LineAudio {
   error?: string;
 }
 
-type RenderJobStatusUI =
-  | 'idle'
-  | 'queued'
-  | 'bundling'
-  | 'rendering'
-  | 'done'
-  | 'error';
-
-interface RenderJobUI {
-  status: RenderJobStatusUI;
-  progress: number;
-  renderedFrames?: number;
-  totalFrames?: number;
-  outputUrl?: string;
-  error?: string;
-}
-
 function newJobId(): string {
   const d = new Date();
   const pad = (n: number) => String(n).padStart(2, '0');
@@ -69,7 +58,7 @@ export default function Home() {
   const [topic, setTopic] = useState('');
   const [mode, setMode] = useState<ScriptMode>('dialogue');
   const [parentGender, setParentGender] = useState<ParentGender>('mom');
-  const [slideCount, setSlideCount] = useState(6);
+  const [targetMinutes, setTargetMinutes] = useState(6);
   const [script, setScript] = useState('');
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState<string | null>(null);
@@ -84,18 +73,115 @@ export default function Home() {
   const [research, setResearch] = useState('');
   const [researching, setResearching] = useState(false);
   const [researchError, setResearchError] = useState<string | null>(null);
+  const [autoNotebook, setAutoNotebook] = useState<{
+    id: string;
+    title: string;
+    via: 'pdf' | 'research';
+  } | null>(null);
   const [validateOn, setValidateOn] = useState(false);
-  const [slidesJson, setSlidesJson] = useState('');
-  const [generatingSlides, setGeneratingSlides] = useState(false);
-  const [slidesError, setSlidesError] = useState<string | null>(null);
+  const [scriptUseApi, setScriptUseApi] = useState(true);
+  const [scriptPrompt, setScriptPrompt] = useState<{ system: string; user: string } | null>(null);
+  const [scriptCopied, setScriptCopied] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [audioByLine, setAudioByLine] = useState<Record<number, LineAudio>>({});
   const [synthesizing, setSynthesizing] = useState(false);
   const [synthError, setSynthError] = useState<string | null>(null);
   const blobUrlsRef = useRef<string[]>([]);
-  const [renderJob, setRenderJob] = useState<RenderJobUI>({ status: 'idle', progress: 0 });
-  const [renderError, setRenderError] = useState<string | null>(null);
+
+  // Phase B — 슬라이드 이미지 (NotebookLM 자동 / 수동 업로드 / Claude 프롬프트)
+  const [slideImages, setSlideImages] = useState<Record<number, string>>({});
+  const [slidedeckLoading, setSlidedeckLoading] = useState(false);
+  const [slidedeckError, setSlidedeckError] = useState<string | null>(null);
+  const [slidedeckInfo, setSlidedeckInfo] = useState<{
+    pageCount: number;
+    notebookId: string;
+  } | null>(null);
+  const [imagePromptByIdx, setImagePromptByIdx] = useState<Record<number, string>>({});
+  const [imagePromptLoadingIdx, setImagePromptLoadingIdx] = useState<number | null>(null);
+  const [uploadingIdx, setUploadingIdx] = useState<number | null>(null);
+
+  // Phase C — ffmpeg MP4 렌더 잡 폴링
+  type RenderStatus =
+    | 'idle'
+    | 'queued'
+    | 'audio_concat'
+    | 'segment_render'
+    | 'final_concat'
+    | 'done'
+    | 'error';
+  interface RenderState {
+    status: RenderStatus;
+    progress: number;
+    currentSlide?: number;
+    totalSlides?: number;
+    outputUrl?: string;
+    error?: string;
+  }
+  const [renderState, setRenderState] = useState<RenderState>({
+    status: 'idle',
+    progress: 0,
+  });
   const renderPollRef = useRef<number | null>(null);
+  useEffect(() => {
+    return () => {
+      if (renderPollRef.current) window.clearInterval(renderPollRef.current);
+    };
+  }, []);
+
+  // Phase A — Gemini TTS 설정 (localStorage 영속)
+  const [ttsProvider, setTtsProvider] = useState<TTSProvider>(() => {
+    if (typeof window === 'undefined') return 'supertone';
+    const saved = window.localStorage.getItem(LS_TTS_PROVIDER);
+    return saved === 'gemini' || saved === 'supertone' ? saved : 'supertone';
+  });
+  const [geminiApiKey, setGeminiApiKey] = useState(() => {
+    if (typeof window === 'undefined') return '';
+    return window.localStorage.getItem(LS_GEMINI_KEY) ?? '';
+  });
+  const [geminiKeyVisible, setGeminiKeyVisible] = useState(false);
+  const initialVoices = (() => {
+    if (typeof window === 'undefined') return GEMINI_DEFAULT_VOICE;
+    try {
+      const json = window.localStorage.getItem(LS_GEMINI_VOICES);
+      if (!json) return GEMINI_DEFAULT_VOICE;
+      const v = JSON.parse(json) as { jjangsaem?: string; mom?: string; dad?: string };
+      return {
+        jjangsaem: v.jjangsaem || GEMINI_DEFAULT_VOICE.jjangsaem,
+        mom: v.mom || GEMINI_DEFAULT_VOICE.mom,
+        dad: v.dad || GEMINI_DEFAULT_VOICE.dad,
+      };
+    } catch {
+      return GEMINI_DEFAULT_VOICE;
+    }
+  })();
+  const [geminiVoiceJjangsaem, setGeminiVoiceJjangsaem] = useState<string>(
+    initialVoices.jjangsaem
+  );
+  const [geminiVoiceMom, setGeminiVoiceMom] = useState<string>(initialVoices.mom);
+  const [geminiVoiceDad, setGeminiVoiceDad] = useState<string>(initialVoices.dad);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(LS_TTS_PROVIDER, ttsProvider);
+  }, [ttsProvider]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (geminiApiKey) window.localStorage.setItem(LS_GEMINI_KEY, geminiApiKey);
+    else window.localStorage.removeItem(LS_GEMINI_KEY);
+  }, [geminiApiKey]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(
+      LS_GEMINI_VOICES,
+      JSON.stringify({
+        jjangsaem: geminiVoiceJjangsaem,
+        mom: geminiVoiceMom,
+        dad: geminiVoiceDad,
+      })
+    );
+  }, [geminiVoiceJjangsaem, geminiVoiceMom, geminiVoiceDad]);
 
   const parsed = useMemo(() => parseScript(script), [script]);
   const validation = useMemo(() => validateScript(parsed, mode), [parsed, mode]);
@@ -117,7 +203,6 @@ export default function Home() {
           (n: { id: string; title: string }) => ({ id: n.id, title: n.title })
         );
         setNotebooks(list);
-        if (list.length > 0 && !notebookId) setNotebookId(list[0].id);
       } catch (err) {
         if (!cancelled) setNotebooksError(err instanceof Error ? err.message : String(err));
       } finally {
@@ -128,154 +213,13 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const parsedDeck = useMemo<Deck | null>(() => {
-    if (!slidesJson.trim()) return null;
-    try {
-      const obj = JSON.parse(slidesJson) as Deck;
-      if (!Array.isArray(obj.slides)) return null;
-      return obj;
-    } catch {
-      return null;
-    }
-  }, [slidesJson]);
-
-  const audioLines = useMemo<AudioLine[]>(() => {
-    return parsed.lines
-      .map((l, i) => {
-        const a = audioByLine[i];
-        if (!a || a.status !== 'done' || !a.staticUrl) return null;
-        const len = typeof a.audioLengthSec === 'number' && a.audioLengthSec > 0
-          ? a.audioLengthSec
-          : 0;
-        if (!len) return null;
-        return {
-          slideIdx: l.slideIdx,
-          speaker: l.speaker,
-          text: l.text,
-          audioUrl: a.staticUrl,
-          audioLengthSec: len,
-        } satisfies AudioLine;
-      })
-      .filter((x): x is AudioLine => x !== null);
-  }, [parsed.lines, audioByLine]);
-
-  const allAudioReady =
-    parsed.lines.length > 0 && audioLines.length === parsed.lines.length;
-
-  const deckWithAudio = useMemo<Deck | null>(() => {
-    if (!parsedDeck) return null;
-    return audioLines.length > 0 ? { ...parsedDeck, audio: audioLines } : parsedDeck;
-  }, [parsedDeck, audioLines]);
-
-  const canRender =
-    !!parsedDeck && allAudioReady && !!jobId && renderJob.status !== 'queued' &&
-    renderJob.status !== 'bundling' && renderJob.status !== 'rendering';
-
-  async function pollRenderJob(id: string) {
-    try {
-      const res = await fetch(`/api/render-video?jobId=${encodeURIComponent(id)}`);
-      const data = await res.json();
-      if (!res.ok) {
-        setRenderError(data?.message || data?.error || `HTTP ${res.status}`);
-        setRenderJob((prev) => ({ ...prev, status: 'error', error: data?.error }));
-        return;
-      }
-      const j = data.job as {
-        status: RenderJobStatusUI;
-        progress: number;
-        renderedFrames?: number;
-        totalFrames?: number;
-        outputUrl?: string;
-        error?: string;
-      };
-      setRenderJob({
-        status: j.status,
-        progress: j.progress ?? 0,
-        renderedFrames: j.renderedFrames,
-        totalFrames: j.totalFrames,
-        outputUrl: j.outputUrl,
-        error: j.error,
-      });
-      if (j.status === 'done' || j.status === 'error') {
-        if (renderPollRef.current) {
-          window.clearInterval(renderPollRef.current);
-          renderPollRef.current = null;
-        }
-      }
-    } catch (err) {
-      setRenderError(err instanceof Error ? err.message : String(err));
-    }
-  }
-
-  async function handleRender() {
-    if (!canRender || !deckWithAudio || !jobId) return;
-    setRenderError(null);
-    setRenderJob({ status: 'queued', progress: 0 });
-    try {
-      const res = await fetch('/api/render-video', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jobId, deck: deckWithAudio }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setRenderError(data?.message || data?.error || `HTTP ${res.status}`);
-        setRenderJob({ status: 'error', progress: 0, error: data?.error });
-        return;
-      }
-      // start polling
-      if (renderPollRef.current) window.clearInterval(renderPollRef.current);
-      renderPollRef.current = window.setInterval(() => {
-        void pollRenderJob(jobId);
-      }, 1500);
-      void pollRenderJob(jobId);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setRenderError(message);
-      setRenderJob({ status: 'error', progress: 0, error: message });
-    }
-  }
-
-  useEffect(() => {
-    return () => {
-      if (renderPollRef.current) window.clearInterval(renderPollRef.current);
-    };
-  }, []);
-
-  async function handleGenerateSlides() {
-    if (!script.trim() || !topic.trim() || generatingSlides) return;
-    setSlidesError(null);
-    setGeneratingSlides(true);
-    try {
-      const res = await fetch('/api/generate-slides', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          topic: topic.trim(),
-          script,
-          research: research.trim() || undefined,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setSlidesError(data?.message || data?.error || `HTTP ${res.status}`);
-        return;
-      }
-      setSlidesJson(JSON.stringify(data.deck, null, 2));
-    } catch (err) {
-      setSlidesError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setGeneratingSlides(false);
-    }
-  }
 
   async function handleResearch() {
-    if (!topic.trim() || !notebookId || researching) return;
+    if (!topic.trim() || researching) return;
     setResearchError(null);
     setResearching(true);
+    setAutoNotebook(null);
     try {
       const res = await fetch('/api/research', {
         method: 'POST',
@@ -283,8 +227,10 @@ export default function Home() {
         body: JSON.stringify({
           topic: topic.trim(),
           mode,
-          notebookId,
-          slideCount,
+          notebookId: notebookId || undefined,
+          targetMinutes,
+          pdfText: !notebookId && pdfExtract?.text ? pdfExtract.text : undefined,
+          pdfFileName: !notebookId && pdfFileName ? pdfFileName : undefined,
         }),
       });
       const data = await res.json();
@@ -293,6 +239,16 @@ export default function Home() {
         return;
       }
       setResearch(String(data.findings ?? ''));
+      if (data.createdNotebook) {
+        setAutoNotebook(data.createdNotebook);
+        // 새로 만든 노트북을 노트북 목록에 추가하고 선택
+        const created = data.createdNotebook as { id: string; title: string };
+        setNotebooks((prev) => {
+          if (prev.some((n) => n.id === created.id)) return prev;
+          return [{ id: created.id, title: created.title }, ...prev];
+        });
+        setNotebookId(created.id);
+      }
     } catch (err) {
       setResearchError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -329,6 +285,239 @@ export default function Home() {
     setPdfError(null);
   }
 
+  function buildScriptPromptForManual() {
+    if (!topic.trim()) return;
+    const { system, user } = buildScriptPrompt({
+      topic: topic.trim(),
+      mode,
+      parentGender: mode === 'dialogue' ? parentGender : undefined,
+      targetMinutes,
+      pdfText: pdfExtract?.text,
+      research: research.trim() || undefined,
+    });
+    setScriptPrompt({ system, user });
+    setScriptCopied(false);
+  }
+
+  function ensureJobId(): string {
+    if (jobId) return jobId;
+    const id = newJobId();
+    setJobId(id);
+    return id;
+  }
+
+  // Phase B — NotebookLM 슬라이드 덱 자동 생성
+  async function handleGenerateSlideDeck() {
+    if (!notebookId) {
+      setSlidedeckError('노트북을 먼저 선택해야 합니다 (2번 섹션).');
+      return;
+    }
+    setSlidedeckError(null);
+    setSlidedeckLoading(true);
+    const id = ensureJobId();
+    try {
+      const res = await fetch('/api/generate-slidedeck', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          notebookId,
+          jobId: id,
+          focus: topic.trim() || undefined,
+          length: 'default',
+          language: 'ko',
+          create: true,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setSlidedeckError(data?.message || data?.error || `HTTP ${res.status}`);
+        return;
+      }
+      const next: Record<number, string> = {};
+      const arr = data.slides as { index: number; url: string }[];
+      arr.forEach((s) => {
+        next[s.index] = s.url;
+      });
+      setSlideImages(next);
+      setSlidedeckInfo({ pageCount: data.pageCount, notebookId: data.notebookId });
+    } catch (err) {
+      setSlidedeckError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSlidedeckLoading(false);
+    }
+  }
+
+  async function handleUploadSlide(slideIdx: number, file: File) {
+    setUploadingIdx(slideIdx);
+    const id = ensureJobId();
+    try {
+      const fd = new FormData();
+      fd.append('jobId', id);
+      fd.append('slideIdx', String(slideIdx));
+      fd.append('file', file);
+      const res = await fetch('/api/upload-slide', { method: 'POST', body: fd });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.message || data?.error || `HTTP ${res.status}`);
+      // 캐시 회피 위해 쿼리 추가
+      const url = `${data.url}?t=${Date.now()}`;
+      setSlideImages((prev) => ({ ...prev, [slideIdx]: url }));
+    } catch (err) {
+      alert(`업로드 실패: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setUploadingIdx(null);
+    }
+  }
+
+  // Phase C — MP4 합성
+  const allSlideImagesReady = useMemo(() => {
+    if (parsed.slideCount === 0) return false;
+    for (let i = 0; i < parsed.slideCount; i++) {
+      if (!slideImages[i]) return false;
+    }
+    return true;
+  }, [parsed.slideCount, slideImages]);
+
+  const allAudioReady = useMemo(() => {
+    if (parsed.lines.length === 0) return false;
+    return parsed.lines.every((_, i) => {
+      const a = audioByLine[i];
+      return a && a.status === 'done' && !!a.staticUrl;
+    });
+  }, [parsed.lines, audioByLine]);
+
+  const canRender =
+    !!jobId &&
+    allSlideImagesReady &&
+    allAudioReady &&
+    renderState.status !== 'queued' &&
+    renderState.status !== 'audio_concat' &&
+    renderState.status !== 'segment_render' &&
+    renderState.status !== 'final_concat';
+
+  async function pollRenderJob(id: string) {
+    try {
+      const res = await fetch(`/api/render-video?jobId=${encodeURIComponent(id)}`);
+      const data = await res.json();
+      if (!res.ok) {
+        setRenderState((prev) => ({
+          ...prev,
+          status: 'error',
+          error: data?.message || data?.error || `HTTP ${res.status}`,
+        }));
+        return;
+      }
+      const j = data.job as RenderState & { jobId: string };
+      setRenderState({
+        status: j.status,
+        progress: j.progress ?? 0,
+        currentSlide: j.currentSlide,
+        totalSlides: j.totalSlides,
+        outputUrl: j.outputUrl,
+        error: j.error,
+      });
+      if (j.status === 'done' || j.status === 'error') {
+        if (renderPollRef.current) {
+          window.clearInterval(renderPollRef.current);
+          renderPollRef.current = null;
+        }
+      }
+    } catch (err) {
+      setRenderState((prev) => ({
+        ...prev,
+        status: 'error',
+        error: err instanceof Error ? err.message : String(err),
+      }));
+    }
+  }
+
+  async function handleRenderMp4() {
+    if (!canRender || !jobId) return;
+    setRenderState({ status: 'queued', progress: 0 });
+
+    // 슬라이드별 페이로드 구성
+    const slidesPayload = Array.from({ length: parsed.slideCount }, (_, idx) => {
+      const lineIdxs = parsed.lines
+        .map((l, i) => (l.slideIdx === idx ? i : -1))
+        .filter((i) => i >= 0);
+      const audioUrls = lineIdxs
+        .map((i) => audioByLine[i]?.staticUrl)
+        .filter((u): u is string => !!u);
+      return {
+        slideIdx: idx,
+        // 캐시버스터 쿼리스트링은 서버에서 제거됨 — 그래도 안전하게 raw URL 추출
+        imageUrl: (slideImages[idx] || '').split('?')[0],
+        audioUrls,
+      };
+    });
+
+    try {
+      const res = await fetch('/api/render-video', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobId, slides: slidesPayload }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setRenderState({
+          status: 'error',
+          progress: 0,
+          error: data?.message || data?.error || `HTTP ${res.status}`,
+        });
+        return;
+      }
+      if (renderPollRef.current) window.clearInterval(renderPollRef.current);
+      renderPollRef.current = window.setInterval(() => {
+        void pollRenderJob(jobId);
+      }, 1500);
+      void pollRenderJob(jobId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setRenderState({ status: 'error', progress: 0, error: message });
+    }
+  }
+
+  async function handleSlideImagePrompt(slideIdx: number) {
+    if (!topic.trim()) return;
+    setImagePromptLoadingIdx(slideIdx);
+    try {
+      const slideText = parsed.lines
+        .filter((l) => l.slideIdx === slideIdx)
+        .map((l) => `[${l.speaker === 'jjangsaem' ? '짱샘' : '부모'}] ${l.text}`)
+        .join('\n');
+      const res = await fetch('/api/slide-image-prompt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          topic: topic.trim(),
+          slideText,
+          slideIdx,
+          totalSlides: parsed.slideCount,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.message || data?.error || `HTTP ${res.status}`);
+      setImagePromptByIdx((prev) => ({ ...prev, [slideIdx]: data.prompt }));
+    } catch (err) {
+      alert(`프롬프트 생성 실패: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setImagePromptLoadingIdx(null);
+    }
+  }
+
+  function combinedPromptText(p: { system: string; user: string } | null): string {
+    if (!p) return '';
+    return `[System]\n${p.system}\n\n[User]\n${p.user}`;
+  }
+
+  async function copyToClipboard(text: string, onDone: () => void) {
+    try {
+      await navigator.clipboard.writeText(text);
+      onDone();
+    } catch {
+      // ignore
+    }
+  }
+
   async function handleGenerate() {
     if (!topic.trim() || generating) return;
     setGenError(null);
@@ -342,7 +531,7 @@ export default function Home() {
           topic: topic.trim(),
           mode,
           parentGender: mode === 'dialogue' ? parentGender : undefined,
-          slideCount,
+          targetMinutes,
           pdfText: pdfExtract?.text,
           research: research.trim() || undefined,
         }),
@@ -363,7 +552,9 @@ export default function Home() {
   const canSynthesize =
     parsed.lines.length > 0 &&
     parsed.errors.length === 0 &&
-    parsed.lines.every((l) => l.text.length <= 300);
+    (ttsProvider === 'gemini'
+      ? geminiApiKey.trim().length > 0
+      : parsed.lines.every((l) => l.text.length <= 300));
 
   async function handleSynthesizeAll() {
     if (!canSynthesize || synthesizing) return;
@@ -395,6 +586,16 @@ export default function Home() {
               parentGender,
               text: line.text,
               style: line.style,
+              provider: ttsProvider,
+              geminiApiKey: ttsProvider === 'gemini' ? geminiApiKey : undefined,
+              geminiVoices:
+                ttsProvider === 'gemini'
+                  ? {
+                      jjangsaem: geminiVoiceJjangsaem,
+                      mom: geminiVoiceMom,
+                      dad: geminiVoiceDad,
+                    }
+                  : undefined,
             }),
           });
           const data = await res.json();
@@ -541,35 +742,19 @@ export default function Home() {
         </div>
 
         <div className="mt-3 flex items-center gap-3">
-          <label className="text-xs font-medium">슬라이드 수</label>
+          <label className="text-xs font-medium">목표 영상 길이</label>
           <input
             type="number"
             min={1}
-            max={20}
-            value={slideCount}
-            onChange={(e) => setSlideCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)))}
+            max={30}
+            value={targetMinutes}
+            onChange={(e) =>
+              setTargetMinutes(Math.max(1, Math.min(30, Number(e.target.value) || 1)))
+            }
             className="w-20 rounded border border-zinc-300 dark:border-zinc-700 bg-transparent px-2 py-1 text-sm"
           />
-          <button
-            onClick={handleGenerate}
-            disabled={!topic.trim() || generating || extractingPdf}
-            className="ml-auto rounded bg-violet-600 px-4 py-2 text-sm text-white hover:bg-violet-500 disabled:bg-zinc-400 disabled:cursor-not-allowed"
-          >
-            {generating
-              ? 'Claude 생성 중...'
-              : research.trim()
-                ? '대본 생성 (리서치 기반)'
-                : pdfExtract
-                  ? '대본 생성 (PDF 기반)'
-                  : '대본 생성 (Claude Opus 4.7)'}
-          </button>
+          <span className="text-xs text-zinc-500">분 — 슬라이드 수는 Claude가 자동으로 결정</span>
         </div>
-
-        {genError && (
-          <div className="mt-3 rounded bg-red-50 dark:bg-red-950 p-3 text-xs text-red-800 dark:text-red-200">
-            {genError}
-          </div>
-        )}
       </section>
 
       <section className="mb-6 rounded-lg border border-zinc-200 dark:border-zinc-800 p-4">
@@ -598,29 +783,75 @@ export default function Home() {
             className="min-w-[280px] rounded border border-zinc-300 dark:border-zinc-700 bg-transparent px-2 py-1 text-sm"
           >
             {notebooksLoading ? (
-              <option>불러오는 중...</option>
+              <option value="">불러오는 중...</option>
             ) : notebooks.length === 0 ? (
-              <option>(노트북 없음)</option>
+              <option value="">(노트북 없음)</option>
             ) : (
-              notebooks.map((n) => (
-                <option key={n.id} value={n.id}>
-                  {n.title}
-                </option>
-              ))
+              <>
+                <option value="">— 선택 안 함 (리서치 건너뛰기) —</option>
+                {notebooks.map((n) => (
+                  <option key={n.id} value={n.id}>
+                    {n.title}
+                  </option>
+                ))}
+              </>
             )}
           </select>
           <button
             onClick={handleResearch}
-            disabled={!topic.trim() || !notebookId || researching}
+            disabled={!topic.trim() || researching}
+            title={!topic.trim() ? '먼저 1번 섹션에서 영상 주제를 입력하세요' : undefined}
             className="ml-auto rounded bg-emerald-600 px-4 py-2 text-sm text-white hover:bg-emerald-500 disabled:bg-zinc-400 disabled:cursor-not-allowed"
           >
-            {researching ? '리서치 중... (60-120초)' : '리서치 실행'}
+            {researching
+              ? notebookId
+                ? '리서치 중... (60-120초)'
+                : pdfExtract
+                  ? '새 노트북 생성 + 리서치 중... (90-180초)'
+                  : '웹 리서치 + 노트북 생성 중... (2-3분)'
+              : '리서치 실행'}
           </button>
         </div>
+
+        {!topic.trim() && (
+          <div className="mt-2 text-[11px] text-amber-700 dark:text-amber-300">
+            ⚠️ 위 1번 섹션의 <strong>영상 주제</strong>를 먼저 입력해야 리서치를 실행할 수 있습니다.
+          </div>
+        )}
+
+        {!notebookId && !researching && (
+          <div className="mt-2 rounded bg-emerald-50 dark:bg-emerald-950 p-2 text-[11px] text-emerald-800 dark:text-emerald-200">
+            노트북 미선택 — 리서치 실행 시{' '}
+            {pdfExtract ? (
+              <>
+                업로드한 PDF 텍스트를 소스로 한{' '}
+                <strong>새 노트북</strong>이 자동 생성됩니다.
+              </>
+            ) : (
+              <>
+                NotebookLM이 웹에서 관련 자료를 찾아 <strong>새 노트북</strong>을 자동
+                생성합니다 (fast 모드, ~10개 소스).
+              </>
+            )}
+          </div>
+        )}
 
         {researchError && (
           <div className="mt-3 rounded bg-red-50 dark:bg-red-950 p-3 text-xs text-red-800 dark:text-red-200">
             {researchError}
+          </div>
+        )}
+
+        {autoNotebook && (
+          <div className="mt-3 rounded bg-emerald-50 dark:bg-emerald-950 p-3 text-xs text-emerald-800 dark:text-emerald-200">
+            ✓ 새 노트북 자동 생성:{' '}
+            <strong>{autoNotebook.title}</strong>
+            <span className="ml-2 text-emerald-600 dark:text-emerald-400">
+              ({autoNotebook.via === 'pdf' ? 'PDF 텍스트 소스' : '웹 리서치 결과'} 기반)
+            </span>
+            <div className="mt-1 text-[11px] opacity-80">
+              ID: <code>{autoNotebook.id}</code> — 다음 리서치부터는 이 노트북을 재사용할 수 있습니다.
+            </div>
           </div>
         )}
 
@@ -643,16 +874,111 @@ export default function Home() {
 
       <section className="mb-6 rounded-lg border border-zinc-200 dark:border-zinc-800 p-4">
         <h2 className="mb-3 text-sm font-semibold">
-          3. 대본 입력
+          3. 대본 생성 / 편집
           <span className="ml-2 text-xs font-normal text-zinc-500">
             (형식: <code>## 슬라이드 N</code> 헤더 + <code>[부모]</code>/<code>[짱샘]</code> 라벨)
           </span>
         </h2>
+
+        {!research.trim() && notebookId && (
+          <div className="mb-3 rounded bg-amber-50 dark:bg-amber-950 p-3 text-xs text-amber-800 dark:text-amber-200">
+            ⚠️ 노트북을 선택했지만 아직 리서치를 실행하지 않았습니다. 위 2번 섹션에서{' '}
+            <strong>[리서치 실행]</strong> 버튼을 눌러 결과를 받아온 뒤 대본을 생성하세요.
+            <span className="opacity-70"> (그냥 진행하면 노트북 자료가 반영되지 않습니다.)</span>
+          </div>
+        )}
+
+        {!research.trim() && !notebookId && !pdfExtract && (
+          <div className="mb-3 rounded bg-amber-50 dark:bg-amber-950 p-3 text-xs text-amber-800 dark:text-amber-200">
+            ⚠️ 리서치 결과나 PDF 없이 대본을 생성합니다. Claude의 자체 지식만으로 작성되므로
+            근거가 약할 수 있어요. 위 2번 섹션에서 리서치를 먼저 실행하는 것을 권장합니다.
+          </div>
+        )}
+
+        <div className="mb-3 flex flex-wrap items-center gap-3">
+          <div className="inline-flex rounded border border-zinc-300 dark:border-zinc-700 text-xs">
+            <button
+              onClick={() => setScriptUseApi(true)}
+              className={`px-3 py-1.5 ${scriptUseApi ? 'bg-violet-600 text-white' : 'text-zinc-600 dark:text-zinc-400'}`}
+            >
+              API 호출
+            </button>
+            <button
+              onClick={() => setScriptUseApi(false)}
+              className={`px-3 py-1.5 ${!scriptUseApi ? 'bg-violet-600 text-white' : 'text-zinc-600 dark:text-zinc-400'}`}
+            >
+              수동 (Claude.ai 웹)
+            </button>
+          </div>
+          {scriptUseApi ? (
+            <button
+              onClick={handleGenerate}
+              disabled={!topic.trim() || generating || extractingPdf}
+              className="rounded bg-violet-600 px-4 py-2 text-sm text-white hover:bg-violet-500 disabled:bg-zinc-400 disabled:cursor-not-allowed"
+            >
+              {generating
+                ? 'Claude 생성 중...'
+                : research.trim()
+                  ? '대본 생성 (리서치 기반)'
+                  : pdfExtract
+                    ? '대본 생성 (PDF 기반)'
+                    : '대본 생성 (근거 없음)'}
+            </button>
+          ) : (
+            <button
+              onClick={buildScriptPromptForManual}
+              disabled={!topic.trim() || extractingPdf}
+              className="rounded bg-violet-600 px-4 py-2 text-sm text-white hover:bg-violet-500 disabled:bg-zinc-400 disabled:cursor-not-allowed"
+            >
+              프롬프트 생성
+            </button>
+          )}
+          <span className="text-xs text-zinc-500">
+            {research.trim() && `리서치 ${research.trim().length.toLocaleString()}자`}
+            {research.trim() && pdfExtract && ' · '}
+            {pdfExtract && `PDF ${pdfExtract.text.length.toLocaleString()}자`}
+            {!research.trim() && !pdfExtract && '근거 자료 없음'}
+          </span>
+        </div>
+
+        {!scriptUseApi && scriptPrompt && (
+          <div className="mb-3 rounded border border-violet-300 dark:border-violet-800 bg-violet-50 dark:bg-violet-950 p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-xs font-medium text-violet-900 dark:text-violet-100">
+                Claude.ai 웹에 붙여넣기 — 결과를 아래 textarea에 그대로 붙여넣으세요
+              </span>
+              <button
+                onClick={() =>
+                  copyToClipboard(combinedPromptText(scriptPrompt), () => setScriptCopied(true))
+                }
+                className="rounded bg-violet-600 px-3 py-1 text-xs text-white hover:bg-violet-500"
+              >
+                {scriptCopied ? '복사됨 ✓' : '프롬프트 복사'}
+              </button>
+            </div>
+            <textarea
+              readOnly
+              value={combinedPromptText(scriptPrompt)}
+              rows={10}
+              className="w-full rounded border border-violet-300 dark:border-violet-800 bg-white dark:bg-zinc-900 px-3 py-2 font-mono text-[11px] leading-5"
+            />
+            <p className="mt-1 text-[11px] text-violet-800 dark:text-violet-200">
+              💡 claude.ai에서 [System] 영역은 시스템 프롬프트 / Project instructions에, [User] 영역은 일반 메시지로 보내거나, 통째로 붙여넣어도 됩니다.
+            </p>
+          </div>
+        )}
+
+        {genError && (
+          <div className="mb-3 rounded bg-red-50 dark:bg-red-950 p-3 text-xs text-red-800 dark:text-red-200">
+            {genError}
+          </div>
+        )}
+
         <textarea
           value={script}
           onChange={(e) => setScript(e.target.value)}
           rows={18}
-          placeholder={`주제 입력 후 위의 "대본 생성" 버튼을 누르면 여기에 자동으로 채워집니다. 직접 입력해도 됩니다.\n\n형식 예시:\n${mode === 'solo' ? PLACEHOLDER_SOLO : PLACEHOLDER_DIALOGUE}`}
+          placeholder={`위의 "대본 생성" 버튼을 누르면 여기에 자동으로 채워집니다. 직접 입력해도 됩니다.\n\n형식 예시:\n${mode === 'solo' ? PLACEHOLDER_SOLO : PLACEHOLDER_DIALOGUE}`}
           className="w-full rounded border border-zinc-300 dark:border-zinc-700 bg-transparent px-3 py-2 font-mono text-sm leading-6 placeholder:text-zinc-400 dark:placeholder:text-zinc-600"
         />
         <div className="mt-3 flex items-center gap-3">
@@ -746,61 +1072,156 @@ export default function Home() {
 
       <section className="mb-6 rounded-lg border border-zinc-200 dark:border-zinc-800 p-4">
         <h2 className="mb-3 text-sm font-semibold">
-          5. 슬라이드 플랜 + 미리보기
+          5. 슬라이드 이미지
           <span className="ml-2 text-xs font-normal text-zinc-500">
-            대본 → Claude가 슬라이드별 타입·내용 결정 → Remotion Player로 미리보기
+            NotebookLM 자동 생성 + 슬라이드별 PNG 직접 업로드 (Flow 등에서 만든 이미지)
           </span>
         </h2>
 
-        <div className="mb-3 flex items-center gap-3">
+        <div className="mb-3 flex flex-wrap items-center gap-3">
           <button
-            onClick={handleGenerateSlides}
-            disabled={!topic.trim() || !script.trim() || generatingSlides}
+            onClick={handleGenerateSlideDeck}
+            disabled={!notebookId || slidedeckLoading}
             className="rounded bg-fuchsia-600 px-4 py-2 text-sm text-white hover:bg-fuchsia-500 disabled:bg-zinc-400 disabled:cursor-not-allowed"
           >
-            {generatingSlides ? '슬라이드 생성 중...' : '슬라이드 생성 (Claude)'}
+            {slidedeckLoading
+              ? 'NotebookLM 슬라이드 덱 생성 + PNG 변환 중... (3~7분)'
+              : '슬라이드 덱 자동 생성 (NotebookLM)'}
           </button>
-          {parsedDeck && (
+          {!notebookId && (
+            <span className="text-xs text-amber-700 dark:text-amber-300">
+              ⚠️ 위 2번 섹션에서 노트북을 먼저 선택하세요.
+            </span>
+          )}
+          {slidedeckInfo && (
             <span className="text-xs text-zinc-600 dark:text-zinc-400">
-              {parsedDeck.slides.length}개 슬라이드 — 각 5초 기본
+              {slidedeckInfo.pageCount}페이지 변환 완료. 마음에 안드는 슬라이드는 아래에서 교체 업로드.
             </span>
           )}
         </div>
 
-        {slidesError && (
+        {slidedeckError && (
           <div className="mb-3 rounded bg-red-50 dark:bg-red-950 p-3 text-xs text-red-800 dark:text-red-200">
-            {slidesError}
+            {slidedeckError}
           </div>
         )}
 
-        <label className="block text-xs font-medium">슬라이드 플랜 JSON (편집 가능)</label>
-        <textarea
-          value={slidesJson}
-          onChange={(e) => setSlidesJson(e.target.value)}
-          rows={10}
-          placeholder='{"topic": "...", "slides": [{"type": "title", "title": "..."}, ...]}'
-          className="mt-1 w-full rounded border border-zinc-300 dark:border-zinc-700 bg-transparent px-3 py-2 font-mono text-xs leading-5 placeholder:text-zinc-400 dark:placeholder:text-zinc-600"
-        />
-
-        {slidesJson.trim() && !parsedDeck && (
-          <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">
-            JSON 파싱 실패 — 형식 확인 필요
-          </p>
-        )}
-
-        {parsedDeck && (
-          <div className="mt-3">
-            <SlidePlayer deck={deckWithAudio ?? parsedDeck} />
-            {audioLines.length > 0 && audioLines.length < parsed.lines.length && (
-              <p className="mt-2 text-[11px] text-amber-600 dark:text-amber-400">
-                일부 라인 음성만 합쳐졌습니다 — {audioLines.length}/{parsed.lines.length}
-              </p>
-            )}
-            {allAudioReady && (
-              <p className="mt-2 text-[11px] text-emerald-600 dark:text-emerald-400">
-                ✓ 모든 음성 합산 — 슬라이드 길이 자동 동기화 + 자막 표시
-              </p>
-            )}
+        {parsed.slideCount === 0 ? (
+          <div className="rounded bg-amber-50 dark:bg-amber-950 p-3 text-xs text-amber-800 dark:text-amber-200">
+            아직 대본이 없거나 파싱된 슬라이드가 0개입니다. 위 3번 섹션에서 대본을 먼저 작성하세요.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {Array.from({ length: parsed.slideCount }, (_, idx) => {
+              const slideLines = parsed.lines.filter((l) => l.slideIdx === idx);
+              const imgUrl = slideImages[idx];
+              const promptText = imagePromptByIdx[idx];
+              return (
+                <div
+                  key={idx}
+                  className="rounded border border-zinc-200 dark:border-zinc-800 p-3"
+                >
+                  <div className="mb-2 flex items-center justify-between">
+                    <span className="text-xs font-medium">슬라이드 {idx + 1}</span>
+                    <span className="text-[11px] text-zinc-500">
+                      라인 {slideLines.length}개
+                    </span>
+                  </div>
+                  <div
+                    className="relative w-full overflow-hidden rounded bg-zinc-100 dark:bg-zinc-900"
+                    style={{ aspectRatio: '16 / 9' }}
+                  >
+                    {imgUrl ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={imgUrl}
+                        alt={`슬라이드 ${idx + 1}`}
+                        className="absolute inset-0 h-full w-full object-contain"
+                      />
+                    ) : (
+                      <div className="absolute inset-0 flex items-center justify-center text-xs text-zinc-400">
+                        (이미지 없음)
+                      </div>
+                    )}
+                  </div>
+                  <details className="mt-2">
+                    <summary className="cursor-pointer text-[11px] text-zinc-500">
+                      대본 미리보기 ({slideLines.length}줄)
+                    </summary>
+                    <div className="mt-1 max-h-32 overflow-auto rounded bg-zinc-50 dark:bg-zinc-900 p-2 text-[11px]">
+                      {slideLines.map((l, i) => (
+                        <div key={i} className="py-0.5">
+                          <span
+                            className={
+                              l.speaker === 'jjangsaem'
+                                ? 'text-blue-600'
+                                : 'text-pink-600'
+                            }
+                          >
+                            {l.speaker === 'jjangsaem' ? '짱샘' : '부모'}
+                          </span>
+                          : {l.text}
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <label className="cursor-pointer rounded border border-zinc-300 dark:border-zinc-700 px-2 py-1 text-[11px] hover:bg-zinc-100 dark:hover:bg-zinc-800">
+                      {uploadingIdx === idx ? '업로드 중...' : '교체 업로드'}
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp"
+                        onChange={(e) => {
+                          const f = e.target.files?.[0];
+                          if (f) handleUploadSlide(idx, f);
+                          e.currentTarget.value = '';
+                        }}
+                        disabled={uploadingIdx !== null}
+                        className="hidden"
+                      />
+                    </label>
+                    <button
+                      onClick={() => handleSlideImagePrompt(idx)}
+                      disabled={
+                        !topic.trim() ||
+                        slideLines.length === 0 ||
+                        imagePromptLoadingIdx !== null
+                      }
+                      className="rounded border border-fuchsia-300 dark:border-fuchsia-800 px-2 py-1 text-[11px] text-fuchsia-700 dark:text-fuchsia-300 hover:bg-fuchsia-50 dark:hover:bg-fuchsia-950 disabled:text-zinc-400"
+                    >
+                      {imagePromptLoadingIdx === idx
+                        ? '프롬프트 생성 중...'
+                        : 'Claude로 인포그래픽 프롬프트 받기'}
+                    </button>
+                  </div>
+                  {promptText && (
+                    <div className="mt-2 rounded border border-fuchsia-300 dark:border-fuchsia-800 bg-fuchsia-50 dark:bg-fuchsia-950 p-2">
+                      <div className="mb-1 flex items-center justify-between">
+                        <span className="text-[11px] font-medium text-fuchsia-900 dark:text-fuchsia-100">
+                          Flow에 붙여넣을 프롬프트
+                        </span>
+                        <button
+                          onClick={() =>
+                            copyToClipboard(promptText, () => {
+                              // 짧은 피드백 — alert 대신 콘솔
+                            })
+                          }
+                          className="rounded bg-fuchsia-600 px-2 py-0.5 text-[10px] text-white hover:bg-fuchsia-500"
+                        >
+                          복사
+                        </button>
+                      </div>
+                      <textarea
+                        readOnly
+                        value={promptText}
+                        rows={4}
+                        className="w-full rounded border border-fuchsia-300 dark:border-fuchsia-800 bg-white dark:bg-zinc-900 px-2 py-1 font-mono text-[11px] leading-5"
+                      />
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </section>
@@ -813,6 +1234,86 @@ export default function Home() {
           )}
         </h2>
 
+        <div className="mb-4 rounded border border-zinc-200 dark:border-zinc-800 p-3">
+          <div className="mb-2 flex items-center gap-2">
+            <span className="text-xs font-medium">TTS 공급자</span>
+            <div className="inline-flex rounded border border-zinc-300 dark:border-zinc-700 text-xs">
+              <button
+                onClick={() => setTtsProvider('supertone')}
+                className={`px-3 py-1 ${ttsProvider === 'supertone' ? 'bg-blue-600 text-white' : 'text-zinc-600 dark:text-zinc-400'}`}
+              >
+                Supertone (Sona 2)
+              </button>
+              <button
+                onClick={() => setTtsProvider('gemini')}
+                className={`px-3 py-1 ${ttsProvider === 'gemini' ? 'bg-blue-600 text-white' : 'text-zinc-600 dark:text-zinc-400'}`}
+              >
+                Gemini 2.5 TTS
+              </button>
+            </div>
+          </div>
+
+          {ttsProvider === 'gemini' && (
+            <div className="mt-2 rounded border border-blue-200 dark:border-blue-900 bg-blue-50 dark:bg-blue-950 p-3">
+              <label className="block text-xs font-medium text-blue-900 dark:text-blue-100">
+                Gemini API 키{' '}
+                <span className="font-normal opacity-70">
+                  (Google AI Studio에서 발급, 브라우저 localStorage에 저장됨)
+                </span>
+              </label>
+              <div className="mt-1 flex items-center gap-2">
+                <input
+                  type={geminiKeyVisible ? 'text' : 'password'}
+                  value={geminiApiKey}
+                  onChange={(e) => setGeminiApiKey(e.target.value)}
+                  placeholder="AIza..."
+                  className="flex-1 rounded border border-blue-300 dark:border-blue-800 bg-white dark:bg-zinc-900 px-2 py-1 font-mono text-xs"
+                />
+                <button
+                  onClick={() => setGeminiKeyVisible((v) => !v)}
+                  className="rounded border border-blue-300 dark:border-blue-800 px-2 py-1 text-[11px]"
+                >
+                  {geminiKeyVisible ? '숨김' : '표시'}
+                </button>
+                {geminiApiKey && (
+                  <button
+                    onClick={() => setGeminiApiKey('')}
+                    className="rounded border border-red-300 px-2 py-1 text-[11px] text-red-700"
+                  >
+                    삭제
+                  </button>
+                )}
+              </div>
+
+              <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                <VoiceSelect
+                  label="짱샘 voice"
+                  value={geminiVoiceJjangsaem}
+                  onChange={setGeminiVoiceJjangsaem}
+                  filterFor="jjangsaem"
+                />
+                <VoiceSelect
+                  label="엄마 voice"
+                  value={geminiVoiceMom}
+                  onChange={setGeminiVoiceMom}
+                  filterFor="mom"
+                />
+                <VoiceSelect
+                  label="아빠 voice"
+                  value={geminiVoiceDad}
+                  onChange={setGeminiVoiceDad}
+                  filterFor="dad"
+                />
+              </div>
+              <p className="mt-2 text-[11px] text-blue-800 dark:text-blue-200">
+                💡 모델: <code>gemini-2.5-pro-preview-tts</code>. WAV 24kHz 모노 출력. 모든
+                보이스는 Gemini 30개 사전 정의 보이스 중 선택. 추천(★) 표시는 짱샘 영상
+                톤에 어울릴 만한 후보 — 자유롭게 바꿔도 됨.
+              </p>
+            </div>
+          )}
+        </div>
+
         <div className="mb-3 flex items-center gap-3">
           <button
             onClick={handleSynthesizeAll}
@@ -822,7 +1323,8 @@ export default function Home() {
             {synthesizing ? '합성 중...' : '전체 합성'}
           </button>
           <span className="text-xs text-zinc-500">
-            {parsed.lines.length}줄 — 한 줄씩 순차 호출 (Supertone)
+            {parsed.lines.length}줄 — 한 줄씩 순차 호출 (
+            {ttsProvider === 'gemini' ? 'Gemini 2.5 TTS' : 'Supertone Sona 2'})
           </span>
           {Object.keys(audioByLine).length > 0 && (
             <span className="text-xs text-zinc-600 dark:text-zinc-400">
@@ -836,8 +1338,11 @@ export default function Home() {
 
         {!canSynthesize && parsed.lines.length > 0 && (
           <div className="mb-3 rounded bg-amber-50 dark:bg-amber-950 p-3 text-xs text-amber-800 dark:text-amber-200">
-            파싱 에러나 300자 초과 라인이 있어 합성을 시작할 수 없습니다. 위 검수 패널을
-            확인해주세요.
+            {ttsProvider === 'gemini' && !geminiApiKey.trim()
+              ? 'Gemini API 키를 먼저 입력해주세요.'
+              : ttsProvider === 'supertone'
+                ? '파싱 에러나 300자 초과 라인이 있어 합성을 시작할 수 없습니다. 위 검수 패널을 확인해주세요.'
+                : '파싱 에러가 있어 합성을 시작할 수 없습니다.'}
           </div>
         )}
 
@@ -907,87 +1412,84 @@ export default function Home() {
         <h2 className="mb-3 text-sm font-semibold">
           7. MP4 합성
           <span className="ml-2 text-xs font-normal text-zinc-500">
-            슬라이드 + 음성 + 자막 → 1920×1080 mp4 (Remotion)
+            슬라이드 PNG + 라인 오디오 → 1920×1080 MP4 (ffmpeg). 자막은 vrew에서 추가.
           </span>
         </h2>
 
-        {!parsedDeck && (
+        {parsed.slideCount === 0 && (
           <div className="mb-3 rounded bg-amber-50 dark:bg-amber-950 p-3 text-xs text-amber-800 dark:text-amber-200">
-            먼저 5번에서 슬라이드 플랜을 생성하세요.
+            먼저 3번에서 대본을 작성하세요.
           </div>
         )}
-        {parsedDeck && !allAudioReady && (
+        {parsed.slideCount > 0 && !allSlideImagesReady && (
           <div className="mb-3 rounded bg-amber-50 dark:bg-amber-950 p-3 text-xs text-amber-800 dark:text-amber-200">
-            모든 라인 음성 합성이 완료되어야 렌더할 수 있습니다 ({audioLines.length}/
-            {parsed.lines.length}).
+            모든 슬라이드 이미지가 필요합니다 ({Object.keys(slideImages).length}/
+            {parsed.slideCount}). 5번 섹션에서 자동 생성 또는 업로드해주세요.
+          </div>
+        )}
+        {parsed.slideCount > 0 && allSlideImagesReady && !allAudioReady && (
+          <div className="mb-3 rounded bg-amber-50 dark:bg-amber-950 p-3 text-xs text-amber-800 dark:text-amber-200">
+            모든 라인 음성이 합성되어야 합니다 ({doneCount}/{parsed.lines.length}).
+            6번에서 합성을 완료하세요.
           </div>
         )}
 
         <div className="mb-3 flex items-center gap-3">
           <button
-            onClick={handleRender}
+            onClick={handleRenderMp4}
             disabled={!canRender}
             className="rounded bg-rose-600 px-4 py-2 text-sm text-white hover:bg-rose-500 disabled:bg-zinc-400 disabled:cursor-not-allowed"
           >
-            {renderJob.status === 'queued' && '대기 중...'}
-            {renderJob.status === 'bundling' && '번들링 중...'}
-            {renderJob.status === 'rendering' && '렌더 중...'}
-            {(renderJob.status === 'idle' ||
-              renderJob.status === 'done' ||
-              renderJob.status === 'error') &&
+            {renderState.status === 'queued' && '대기 중...'}
+            {renderState.status === 'audio_concat' &&
+              `슬라이드 ${renderState.currentSlide ?? 1}/${renderState.totalSlides ?? '?'} 오디오 정리 중...`}
+            {renderState.status === 'segment_render' &&
+              `슬라이드 ${renderState.currentSlide ?? 1}/${renderState.totalSlides ?? '?'} 영상 합성 중...`}
+            {renderState.status === 'final_concat' && '최종 합치는 중...'}
+            {(renderState.status === 'idle' ||
+              renderState.status === 'done' ||
+              renderState.status === 'error') &&
               '영상 렌더 시작'}
           </button>
-          {jobId && (
-            <span className="text-xs text-zinc-500">job: {jobId}</span>
-          )}
-          {renderJob.status === 'rendering' && renderJob.totalFrames != null && (
-            <span className="text-xs text-zinc-600 dark:text-zinc-400">
-              {renderJob.renderedFrames ?? 0}/{renderJob.totalFrames} 프레임
-            </span>
-          )}
+          {jobId && <span className="text-xs text-zinc-500">job: {jobId}</span>}
         </div>
 
-        {(renderJob.status === 'queued' ||
-          renderJob.status === 'bundling' ||
-          renderJob.status === 'rendering') && (
+        {(renderState.status === 'queued' ||
+          renderState.status === 'audio_concat' ||
+          renderState.status === 'segment_render' ||
+          renderState.status === 'final_concat') && (
           <div className="mb-3">
-            <div className="h-2 w-full rounded bg-zinc-200 dark:bg-zinc-800 overflow-hidden">
+            <div className="h-2 w-full overflow-hidden rounded bg-zinc-200 dark:bg-zinc-800">
               <div
                 className="h-full bg-rose-500 transition-all"
-                style={{ width: `${Math.round(renderJob.progress * 100)}%` }}
+                style={{ width: `${Math.round(renderState.progress * 100)}%` }}
               />
             </div>
             <p className="mt-1 text-[11px] text-zinc-500">
-              {Math.round(renderJob.progress * 100)}% — 첫 번들링은 30~90초 걸릴 수 있습니다.
+              {Math.round(renderState.progress * 100)}% — 슬라이드 수에 따라 1~5분 소요.
             </p>
           </div>
         )}
 
-        {renderError && (
+        {renderState.status === 'error' && renderState.error && (
           <div className="mb-3 rounded bg-red-50 dark:bg-red-950 p-3 text-xs text-red-800 dark:text-red-200">
-            {renderError}
+            렌더 실패: {renderState.error}
           </div>
         )}
 
-        {renderJob.status === 'error' && renderJob.error && (
-          <div className="mb-3 rounded bg-red-50 dark:bg-red-950 p-3 text-xs text-red-800 dark:text-red-200">
-            렌더 실패: {renderJob.error}
-          </div>
-        )}
-
-        {renderJob.status === 'done' && renderJob.outputUrl && (
+        {renderState.status === 'done' && renderState.outputUrl && (
           <div className="rounded border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950 p-3">
-            <p className="text-xs text-emerald-800 dark:text-emerald-200 font-medium mb-2">
+            <p className="mb-2 text-xs font-medium text-emerald-800 dark:text-emerald-200">
               ✓ 렌더 완료
             </p>
             <video
-              src={renderJob.outputUrl}
+              src={renderState.outputUrl}
               controls
               className="w-full rounded bg-black"
               style={{ aspectRatio: '16 / 9' }}
             />
             <a
-              href={renderJob.outputUrl}
+              href={renderState.outputUrl}
               download={`${jobId}.mp4`}
               className="mt-2 inline-block rounded bg-emerald-600 px-3 py-1.5 text-xs text-white hover:bg-emerald-500"
             >
@@ -997,6 +1499,39 @@ export default function Home() {
         )}
       </section>
     </main>
+  );
+}
+
+function VoiceSelect({
+  label,
+  value,
+  onChange,
+  filterFor,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  filterFor: 'jjangsaem' | 'mom' | 'dad';
+}) {
+  return (
+    <label className="block text-[11px]">
+      <span className="block font-medium text-blue-900 dark:text-blue-100">{label}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="mt-1 w-full rounded border border-blue-300 dark:border-blue-800 bg-white dark:bg-zinc-900 px-2 py-1 text-xs"
+      >
+        {GEMINI_VOICES.map((v) => {
+          const recommended = v.suggestedFor?.includes(filterFor);
+          return (
+            <option key={v.name} value={v.name}>
+              {recommended ? '★ ' : ''}
+              {v.name} — {v.style}
+            </option>
+          );
+        })}
+      </select>
+    </label>
   );
 }
 

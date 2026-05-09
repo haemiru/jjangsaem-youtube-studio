@@ -144,6 +144,120 @@ export interface NotebookQueryResult {
   raw: unknown;
 }
 
+function extractIdFromStdout(stdout: string): string | null {
+  const m = stdout.match(/ID:\s*([0-9a-fA-F-]{20,})/);
+  return m ? m[1].trim() : null;
+}
+
+export async function createNotebook(title: string): Promise<string> {
+  const stdout = await runNlm(['notebook', 'create', title], { timeoutMs: 60_000 });
+  const id = extractIdFromStdout(stdout);
+  if (!id) {
+    throw new NotebookLMError(
+      'parse_error',
+      'notebook create 응답에서 노트북 ID를 찾을 수 없습니다.',
+      { stdout: stdout.slice(0, 500) }
+    );
+  }
+  return id;
+}
+
+export async function addTextSource(
+  notebookId: string,
+  text: string,
+  sourceTitle: string,
+  options: { timeoutSec?: number } = {}
+): Promise<string> {
+  const timeoutSec = options.timeoutSec ?? 180;
+  const stdout = await runNlm(
+    ['source', 'add', notebookId, '--text', text, '--title', sourceTitle, '--wait'],
+    { timeoutMs: (timeoutSec + 30) * 1000 }
+  );
+  const id = extractIdFromStdout(stdout);
+  if (!id) {
+    throw new NotebookLMError(
+      'parse_error',
+      'source add 응답에서 소스 ID를 찾을 수 없습니다.',
+      { stdout: stdout.slice(0, 500) }
+    );
+  }
+  return id;
+}
+
+export async function startResearchAutoImport(
+  query: string,
+  notebookTitle: string,
+  options: { mode?: 'fast' | 'deep'; timeoutSec?: number } = {}
+): Promise<string> {
+  const mode = options.mode ?? 'fast';
+  const timeoutSec = options.timeoutSec ?? (mode === 'fast' ? 180 : 600);
+  const stdout = await runNlm(
+    [
+      'research',
+      'start',
+      query,
+      '--title',
+      notebookTitle,
+      '--mode',
+      mode,
+      '--auto-import',
+    ],
+    { timeoutMs: (timeoutSec + 30) * 1000 }
+  );
+  const id = extractIdFromStdout(stdout);
+  if (!id) {
+    throw new NotebookLMError(
+      'parse_error',
+      'research start 응답에서 노트북 ID를 찾을 수 없습니다.',
+      { stdout: stdout.slice(0, 800) }
+    );
+  }
+  return id;
+}
+
+export interface CreateSlideDeckOptions {
+  format?: 'detailed_deck' | 'presenter_slides';
+  length?: 'short' | 'default';
+  language?: string;
+  focus?: string;
+  timeoutSec?: number;
+}
+
+export async function createSlideDeck(
+  notebookId: string,
+  options: CreateSlideDeckOptions = {}
+): Promise<string> {
+  const timeoutSec = options.timeoutSec ?? 300;
+  const args = ['slides', 'create', notebookId, '--confirm'];
+  if (options.format) args.push('--format', options.format);
+  if (options.length) args.push('--length', options.length);
+  if (options.language) args.push('--language', options.language);
+  if (options.focus) args.push('--focus', options.focus);
+  return runNlm(args, { timeoutMs: (timeoutSec + 30) * 1000 });
+}
+
+export async function downloadSlideDeck(
+  notebookId: string,
+  outputPath: string,
+  options: { format?: 'pdf' | 'pptx'; timeoutSec?: number } = {}
+): Promise<string> {
+  const timeoutSec = options.timeoutSec ?? 180;
+  const format = options.format ?? 'pdf';
+  return runNlm(
+    [
+      'download',
+      'slide-deck',
+      notebookId,
+      '--output',
+      outputPath,
+      '--format',
+      format,
+      '--no-progress',
+    ],
+    { timeoutMs: (timeoutSec + 30) * 1000 }
+  );
+}
+
 export async function queryNotebook(
   notebookId: string,
   question: string,
@@ -163,27 +277,35 @@ export async function queryNotebook(
     { timeoutMs: (timeoutSec + 30) * 1000 }
   );
 
-  const parsed = tryParseJson(stdout) as Record<string, unknown>;
+  const top = tryParseJson(stdout) as Record<string, unknown>;
+  // nlm CLI 신버전은 응답을 { value: { answer, citations, references, ... } } 로 래핑
+  const inner =
+    top.value && typeof top.value === 'object' && !Array.isArray(top.value)
+      ? (top.value as Record<string, unknown>)
+      : top;
+
   const answer =
-    (parsed.answer as string | undefined) ??
-    (parsed.response as string | undefined) ??
-    (parsed.text as string | undefined) ??
-    (parsed.message as string | undefined) ??
+    (inner.answer as string | undefined) ??
+    (inner.response as string | undefined) ??
+    (inner.text as string | undefined) ??
+    (inner.message as string | undefined) ??
     '';
 
   if (!answer || typeof answer !== 'string') {
     throw new NotebookLMError(
       'parse_error',
       'nlm 응답에서 답변 텍스트를 찾을 수 없습니다. (raw 응답 키: ' +
-        Object.keys(parsed).join(',') +
+        Object.keys(top).join(',') +
+        (top !== inner ? ' / inner: ' + Object.keys(inner).join(',') : '') +
         ')',
-      { stdout: JSON.stringify(parsed).slice(0, 800) }
+      { stdout: JSON.stringify(top).slice(0, 800) }
     );
   }
 
   return {
     answer: answer.trim(),
-    citations: parsed.citations ?? parsed.sources ?? parsed.references,
-    raw: parsed,
+    citations:
+      inner.citations ?? inner.references ?? inner.sources ?? inner.sources_used,
+    raw: top,
   };
 }

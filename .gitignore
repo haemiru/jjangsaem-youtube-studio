@@ -44,4 +44,8 @@ next-env.d.ts
 /output/
 /public/audio/
 /public/videos/
+/public/slides/
+
+# Claude Code 로컬 상태
+/.claude/
 

@@ -9,7 +9,7 @@ interface GenerateScriptBody {
   topic: string;
   mode: ScriptMode;
   parentGender?: ParentGender;
-  slideCount?: number;
+  targetMinutes?: number;
   pdfText?: string;
   research?: string;
 }
@@ -28,7 +28,7 @@ export async function POST(request: NextRequest) {
   const topic = (body.topic ?? '').trim();
   const mode = body.mode;
   const parentGender = body.parentGender;
-  const slideCount = body.slideCount ?? 6;
+  const targetMinutes = body.targetMinutes ?? 6;
   const pdfText =
     typeof body.pdfText === 'string' && body.pdfText.trim()
       ? body.pdfText.slice(0, PDF_TEXT_LIMIT)
@@ -50,8 +50,8 @@ export async function POST(request: NextRequest) {
       { status: 400 }
     );
   }
-  if (typeof slideCount !== 'number' || slideCount < 1 || slideCount > 20) {
-    return Response.json({ error: 'slideCount는 1~20 사이' }, { status: 400 });
+  if (typeof targetMinutes !== 'number' || targetMinutes < 1 || targetMinutes > 30) {
+    return Response.json({ error: 'targetMinutes는 1~30 사이' }, { status: 400 });
   }
 
   try {
@@ -59,7 +59,7 @@ export async function POST(request: NextRequest) {
       topic,
       mode,
       parentGender,
-      slideCount,
+      targetMinutes,
       pdfText,
       research,
     });
@@ -67,7 +67,7 @@ export async function POST(request: NextRequest) {
     return Response.json({
       script,
       mode,
-      slideCount,
+      targetMinutes,
       usedPdf: Boolean(pdfText),
       usedResearch: Boolean(research),
     });

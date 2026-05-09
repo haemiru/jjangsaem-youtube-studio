@@ -1,19 +1,30 @@
 import type { NextRequest } from 'next/server';
-import { queryNotebook, NotebookLMError } from '@/lib/notebooklm';
+import {
+  queryNotebook,
+  createNotebook,
+  addTextSource,
+  startResearchAutoImport,
+  NotebookLMError,
+} from '@/lib/notebooklm';
 
 export const runtime = 'nodejs';
-export const maxDuration = 180;
+// research start --auto-import (fast mode) ≈ 30~60s, query ≈ 60~120s. Allow up to 5 min total.
+export const maxDuration = 300;
 
 type ScriptMode = 'dialogue' | 'solo';
 
 interface ResearchBody {
   topic: string;
   mode: ScriptMode;
-  notebookId: string;
-  slideCount?: number;
+  notebookId?: string;
+  targetMinutes?: number;
+  pdfText?: string;
+  pdfFileName?: string;
 }
 
-function buildResearchQuestion(topic: string, mode: ScriptMode, slideCount: number): string {
+const PDF_TEXT_LIMIT = 50_000;
+
+function buildResearchQuestion(topic: string, mode: ScriptMode, targetMinutes: number): string {
   const audience =
     mode === 'dialogue'
       ? '한국 부모를 위한 짱샘(25년차 아동 재활치료사) 유튜브 영상 — 부모 ↔ 짱샘 대화 형식'
@@ -24,7 +35,7 @@ function buildResearchQuestion(topic: string, mode: ScriptMode, slideCount: numb
     ``,
     `대상: ${audience}`,
     `주제: ${topic}`,
-    `슬라이드 수: ${slideCount}개`,
+    `목표 길이: 약 ${targetMinutes}분`,
     ``,
     `이 주제에 대해 자료에서 다음을 정리해줘:`,
     `1. 핵심 메시지 3~5개 (부모가 꼭 알아야 할 사실)`,
@@ -38,6 +49,15 @@ function buildResearchQuestion(topic: string, mode: ScriptMode, slideCount: numb
   ].join('\n');
 }
 
+function buildAutoNotebookTitle(topic: string): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  // NotebookLM titles can be long but keep it readable
+  const t = topic.length > 50 ? topic.slice(0, 50) + '…' : topic;
+  return `[자동] ${t} (${date})`;
+}
+
 export async function POST(request: NextRequest) {
   let body: ResearchBody;
   try {
@@ -49,7 +69,12 @@ export async function POST(request: NextRequest) {
   const topic = (body.topic ?? '').trim();
   const mode = body.mode;
   const notebookId = (body.notebookId ?? '').trim();
-  const slideCount = body.slideCount ?? 6;
+  const targetMinutes = body.targetMinutes ?? 6;
+  const pdfText =
+    typeof body.pdfText === 'string' && body.pdfText.trim()
+      ? body.pdfText.slice(0, PDF_TEXT_LIMIT)
+      : undefined;
+  const pdfFileName = (body.pdfFileName ?? '').trim() || undefined;
 
   if (!topic) {
     return Response.json({ error: '주제(topic)가 비어있습니다' }, { status: 400 });
@@ -57,18 +82,40 @@ export async function POST(request: NextRequest) {
   if (mode !== 'dialogue' && mode !== 'solo') {
     return Response.json({ error: 'mode는 dialogue 또는 solo' }, { status: 400 });
   }
-  if (!notebookId) {
-    return Response.json({ error: 'notebookId 필수' }, { status: 400 });
-  }
 
-  const question = buildResearchQuestion(topic, mode, slideCount);
+  const question = buildResearchQuestion(topic, mode, targetMinutes);
 
   try {
-    const result = await queryNotebook(notebookId, question, { timeoutSec: 150 });
+    let resolvedNotebookId = notebookId;
+    let createdNotebook: { id: string; title: string; via: 'pdf' | 'research' } | null = null;
+
+    if (!resolvedNotebookId) {
+      const title = buildAutoNotebookTitle(topic);
+
+      if (pdfText) {
+        // Case 1.2 — PDF 있고 노트북 미선택 → 새 노트북 + 텍스트 소스 추가
+        const newId = await createNotebook(title);
+        const sourceTitle = pdfFileName ? `${pdfFileName} (PDF 텍스트)` : 'PDF 텍스트';
+        await addTextSource(newId, pdfText, sourceTitle, { timeoutSec: 240 });
+        resolvedNotebookId = newId;
+        createdNotebook = { id: newId, title, via: 'pdf' };
+      } else {
+        // Case 2.2 — 주제만 있고 노트북 미선택 → research start --auto-import
+        const newId = await startResearchAutoImport(topic, title, {
+          mode: 'fast',
+          timeoutSec: 240,
+        });
+        resolvedNotebookId = newId;
+        createdNotebook = { id: newId, title, via: 'research' };
+      }
+    }
+
+    const result = await queryNotebook(resolvedNotebookId, question, { timeoutSec: 150 });
     return Response.json({
       findings: result.answer,
       citations: result.citations ?? null,
-      notebookId,
+      notebookId: resolvedNotebookId,
+      createdNotebook,
       question,
     });
   } catch (err) {

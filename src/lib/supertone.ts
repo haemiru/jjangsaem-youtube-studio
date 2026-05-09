@@ -46,7 +46,7 @@ export async function synthesize(opts: SynthesizeOptions): Promise<SynthesizeRes
     voiceId,
     text,
     language = 'ko',
-    model = 'sona_speech_1',
+    model = 'sona_speech_2',
     style,
     voiceSettings,
     outputFormat = 'mp3',
