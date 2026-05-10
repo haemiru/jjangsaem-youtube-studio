@@ -153,50 +153,59 @@ export default function Home() {
   }, []);
 
   // Phase A — Gemini TTS 설정 (localStorage 영속)
-  const [ttsProvider, setTtsProvider] = useState<TTSProvider>(() => {
-    if (typeof window === 'undefined') return 'supertone';
-    const saved = window.localStorage.getItem(LS_TTS_PROVIDER);
-    return saved === 'gemini' || saved === 'supertone' ? saved : 'supertone';
-  });
-  const [geminiApiKey, setGeminiApiKey] = useState(() => {
-    if (typeof window === 'undefined') return '';
-    return window.localStorage.getItem(LS_GEMINI_KEY) ?? '';
-  });
+  // SSR/client 일치를 위해 기본값으로 시작하고, 마운트 후 useEffect에서 localStorage 읽음.
+  const [ttsProvider, setTtsProvider] = useState<TTSProvider>('supertone');
+  const [geminiApiKey, setGeminiApiKey] = useState('');
   const [geminiKeyVisible, setGeminiKeyVisible] = useState(false);
-  const initialVoices = (() => {
-    if (typeof window === 'undefined') return GEMINI_DEFAULT_VOICE;
-    try {
-      const json = window.localStorage.getItem(LS_GEMINI_VOICES);
-      if (!json) return GEMINI_DEFAULT_VOICE;
-      const v = JSON.parse(json) as { jjangsaem?: string; mom?: string; dad?: string };
-      return {
-        jjangsaem: v.jjangsaem || GEMINI_DEFAULT_VOICE.jjangsaem,
-        mom: v.mom || GEMINI_DEFAULT_VOICE.mom,
-        dad: v.dad || GEMINI_DEFAULT_VOICE.dad,
-      };
-    } catch {
-      return GEMINI_DEFAULT_VOICE;
-    }
-  })();
   const [geminiVoiceJjangsaem, setGeminiVoiceJjangsaem] = useState<string>(
-    initialVoices.jjangsaem
+    GEMINI_DEFAULT_VOICE.jjangsaem
   );
-  const [geminiVoiceMom, setGeminiVoiceMom] = useState<string>(initialVoices.mom);
-  const [geminiVoiceDad, setGeminiVoiceDad] = useState<string>(initialVoices.dad);
+  const [geminiVoiceMom, setGeminiVoiceMom] = useState<string>(GEMINI_DEFAULT_VOICE.mom);
+  const [geminiVoiceDad, setGeminiVoiceDad] = useState<string>(GEMINI_DEFAULT_VOICE.dad);
+  const [tssHydrated, setTssHydrated] = useState(false);
+
+  useEffect(() => {
+    // 마운트 후 localStorage에서 한번에 hydrate (SSR mismatch 회피)
+    try {
+      const provider = window.localStorage.getItem(LS_TTS_PROVIDER);
+      if (provider === 'gemini' || provider === 'supertone') {
+        setTtsProvider(provider);
+      }
+      const key = window.localStorage.getItem(LS_GEMINI_KEY);
+      if (key) setGeminiApiKey(key);
+      const voicesJson = window.localStorage.getItem(LS_GEMINI_VOICES);
+      if (voicesJson) {
+        const v = JSON.parse(voicesJson) as {
+          jjangsaem?: string;
+          mom?: string;
+          dad?: string;
+        };
+        if (v?.jjangsaem) setGeminiVoiceJjangsaem(v.jjangsaem);
+        if (v?.mom) setGeminiVoiceMom(v.mom);
+        if (v?.dad) setGeminiVoiceDad(v.dad);
+      }
+    } catch {
+      // ignore
+    }
+    setTssHydrated(true);
+  }, []);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
+    if (!tssHydrated) return; // hydrate 전엔 default를 localStorage에 덮어쓰지 말 것
     window.localStorage.setItem(LS_TTS_PROVIDER, ttsProvider);
-  }, [ttsProvider]);
+  }, [ttsProvider, tssHydrated]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
+    if (!tssHydrated) return;
     if (geminiApiKey) window.localStorage.setItem(LS_GEMINI_KEY, geminiApiKey);
     else window.localStorage.removeItem(LS_GEMINI_KEY);
-  }, [geminiApiKey]);
+  }, [geminiApiKey, tssHydrated]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
+    if (!tssHydrated) return;
     window.localStorage.setItem(
       LS_GEMINI_VOICES,
       JSON.stringify({
@@ -205,7 +214,7 @@ export default function Home() {
         dad: geminiVoiceDad,
       })
     );
-  }, [geminiVoiceJjangsaem, geminiVoiceMom, geminiVoiceDad]);
+  }, [geminiVoiceJjangsaem, geminiVoiceMom, geminiVoiceDad, tssHydrated]);
 
   const parsed = useMemo(() => parseScript(script, mode), [script, mode]);
   const validation = useMemo(() => validateScript(parsed, mode), [parsed, mode]);
