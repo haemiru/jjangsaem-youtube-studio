@@ -5,6 +5,10 @@ import { parseScript } from '@/lib/script-parser';
 import { validateScript } from '@/lib/script-validator';
 import { extractPdfText, type PdfExtractResult } from '@/lib/pdf-extract';
 import { buildPrompt as buildScriptPrompt } from '@/lib/script-prompts';
+import {
+  buildLecturePrompt,
+  parseLectureScript,
+} from '@/lib/lecture-prompts';
 import { GEMINI_VOICES, GEMINI_DEFAULT_VOICE } from '@/lib/gemini-voices';
 
 type TTSProvider = 'supertone' | 'gemini';
@@ -99,6 +103,18 @@ export default function Home() {
   const [imagePromptByIdx, setImagePromptByIdx] = useState<Record<number, string>>({});
   const [imagePromptLoadingIdx, setImagePromptLoadingIdx] = useState<number | null>(null);
   const [uploadingIdx, setUploadingIdx] = useState<number | null>(null);
+
+  // 직접 녹음용 강의 대본 (PowerPoint + OBS 흐름용)
+  const [lectureUseApi, setLectureUseApi] = useState(true);
+  const [lectureScripts, setLectureScripts] = useState<Record<number, string>>({});
+  const [lectureGenerating, setLectureGenerating] = useState(false);
+  const [lectureError, setLectureError] = useState<string | null>(null);
+  const [lecturePrompt, setLecturePrompt] = useState<{
+    system: string;
+    user: string;
+  } | null>(null);
+  const [lecturePromptCopied, setLecturePromptCopied] = useState(false);
+  const [lectureManualPaste, setLectureManualPaste] = useState('');
 
   // Phase C — ffmpeg MP4 렌더 잡 폴링
   type RenderStatus =
@@ -474,6 +490,58 @@ export default function Home() {
       const message = err instanceof Error ? err.message : String(err);
       setRenderState({ status: 'error', progress: 0, error: message });
     }
+  }
+
+  // 강의 대본 — 자동 생성 (Claude API)
+  async function handleGenerateLectureScripts() {
+    if (!topic.trim() || !script.trim() || lectureGenerating) return;
+    setLectureError(null);
+    setLectureGenerating(true);
+    try {
+      const res = await fetch('/api/lecture-scripts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          topic: topic.trim(),
+          script,
+          scriptMode: mode,
+          research: research.trim() || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setLectureError(data?.message || data?.error || `HTTP ${res.status}`);
+        return;
+      }
+      setLectureScripts(data.scripts ?? {});
+    } catch (err) {
+      setLectureError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLectureGenerating(false);
+    }
+  }
+
+  // 강의 대본 — 수동 모드 프롬프트 빌드
+  function buildLecturePromptForManual() {
+    if (!topic.trim() || !script.trim()) return;
+    const { system, user } = buildLecturePrompt({
+      topic: topic.trim(),
+      parsed,
+      research: research.trim() || undefined,
+    });
+    setLecturePrompt({ system, user });
+    setLecturePromptCopied(false);
+  }
+
+  // 강의 대본 — 수동 paste 적용
+  function applyLectureManualPaste() {
+    if (!lectureManualPaste.trim()) return;
+    const byIdx = parseLectureScript(lectureManualPaste);
+    const filled: Record<number, string> = {};
+    for (let i = 0; i < parsed.slideCount; i++) {
+      filled[i] = byIdx[i] ?? '';
+    }
+    setLectureScripts(filled);
   }
 
   async function handleSlideImagePrompt(slideIdx: number) {
@@ -1228,7 +1296,173 @@ export default function Home() {
 
       <section className="mb-6 rounded-lg border border-zinc-200 dark:border-zinc-800 p-4">
         <h2 className="mb-3 text-sm font-semibold">
-          6. 음성 합성
+          6. 직접 녹음용 강의 대본
+          <span className="ml-2 text-xs font-normal text-zinc-500">
+            (옵션) PowerPoint + OBS로 짱샘이 직접 강의·녹음할 때 쓰는 대본. TTS만 쓸 거면 건너뛰어도 됨.
+          </span>
+        </h2>
+
+        <div className="mb-3 flex flex-wrap items-center gap-3">
+          <div className="inline-flex rounded border border-zinc-300 dark:border-zinc-700 text-xs">
+            <button
+              onClick={() => setLectureUseApi(true)}
+              className={`px-3 py-1.5 ${lectureUseApi ? 'bg-orange-600 text-white' : 'text-zinc-600 dark:text-zinc-400'}`}
+            >
+              API 호출
+            </button>
+            <button
+              onClick={() => setLectureUseApi(false)}
+              className={`px-3 py-1.5 ${!lectureUseApi ? 'bg-orange-600 text-white' : 'text-zinc-600 dark:text-zinc-400'}`}
+            >
+              수동 (Claude.ai 웹)
+            </button>
+          </div>
+          {lectureUseApi ? (
+            <button
+              onClick={handleGenerateLectureScripts}
+              disabled={!topic.trim() || !script.trim() || lectureGenerating}
+              className="rounded bg-orange-600 px-4 py-2 text-sm text-white hover:bg-orange-500 disabled:bg-zinc-400 disabled:cursor-not-allowed"
+            >
+              {lectureGenerating ? '강의 대본 생성 중...' : '전체 강의 대본 생성 (Claude)'}
+            </button>
+          ) : (
+            <button
+              onClick={buildLecturePromptForManual}
+              disabled={!topic.trim() || !script.trim()}
+              className="rounded bg-orange-600 px-4 py-2 text-sm text-white hover:bg-orange-500 disabled:bg-zinc-400 disabled:cursor-not-allowed"
+            >
+              프롬프트 생성
+            </button>
+          )}
+          {parsed.slideCount > 0 && (
+            <span className="text-xs text-zinc-600 dark:text-zinc-400">
+              {parsed.slideCount}개 슬라이드 — 슬라이드당 약 60~90초 분량
+            </span>
+          )}
+        </div>
+
+        {!lectureUseApi && lecturePrompt && (
+          <div className="mb-3 rounded border border-orange-300 dark:border-orange-800 bg-orange-50 dark:bg-orange-950 p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-xs font-medium text-orange-900 dark:text-orange-100">
+                Claude.ai 웹에 붙여넣고 응답을 아래 textarea에 붙여넣으세요
+              </span>
+              <button
+                onClick={() =>
+                  copyToClipboard(combinedPromptText(lecturePrompt), () =>
+                    setLecturePromptCopied(true)
+                  )
+                }
+                className="rounded bg-orange-600 px-3 py-1 text-xs text-white hover:bg-orange-500"
+              >
+                {lecturePromptCopied ? '복사됨 ✓' : '프롬프트 복사'}
+              </button>
+            </div>
+            <textarea
+              readOnly
+              value={combinedPromptText(lecturePrompt)}
+              rows={8}
+              className="w-full rounded border border-orange-300 dark:border-orange-800 bg-white dark:bg-zinc-900 px-3 py-2 font-mono text-[11px] leading-5"
+            />
+            <label className="mt-3 block text-[11px] font-medium text-orange-900 dark:text-orange-100">
+              Claude.ai 응답 붙여넣기 (## 슬라이드 N 헤더 형식 그대로)
+            </label>
+            <textarea
+              value={lectureManualPaste}
+              onChange={(e) => setLectureManualPaste(e.target.value)}
+              rows={8}
+              placeholder={`## 슬라이드 1\n자, 어머님 아버님 안녕하세요...\n\n## 슬라이드 2\n...`}
+              className="mt-1 w-full rounded border border-orange-300 dark:border-orange-800 bg-white dark:bg-zinc-900 px-3 py-2 font-mono text-[11px] leading-5"
+            />
+            <button
+              onClick={applyLectureManualPaste}
+              disabled={!lectureManualPaste.trim()}
+              className="mt-2 rounded bg-orange-600 px-3 py-1.5 text-xs text-white hover:bg-orange-500 disabled:bg-zinc-400"
+            >
+              슬라이드별로 분배
+            </button>
+          </div>
+        )}
+
+        {lectureError && (
+          <div className="mb-3 rounded bg-red-50 dark:bg-red-950 p-3 text-xs text-red-800 dark:text-red-200">
+            {lectureError}
+          </div>
+        )}
+
+        {parsed.slideCount === 0 ? (
+          <div className="rounded bg-amber-50 dark:bg-amber-950 p-3 text-xs text-amber-800 dark:text-amber-200">
+            먼저 3번에서 대본을 작성하세요.
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {Array.from({ length: parsed.slideCount }, (_, idx) => {
+              const imgUrl = slideImages[idx];
+              const lectureText = lectureScripts[idx] ?? '';
+              return (
+                <div
+                  key={idx}
+                  className="flex flex-col gap-3 rounded border border-zinc-200 dark:border-zinc-800 p-3 sm:flex-row"
+                >
+                  <div className="flex-shrink-0 sm:w-48">
+                    <div
+                      className="relative w-full overflow-hidden rounded bg-zinc-100 dark:bg-zinc-900"
+                      style={{ aspectRatio: '16 / 9' }}
+                    >
+                      {imgUrl ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={imgUrl}
+                          alt={`슬라이드 ${idx + 1}`}
+                          className="absolute inset-0 h-full w-full object-contain"
+                        />
+                      ) : (
+                        <div className="absolute inset-0 flex items-center justify-center text-[11px] text-zinc-400">
+                          (이미지 없음)
+                        </div>
+                      )}
+                    </div>
+                    <p className="mt-1 text-[11px] font-medium">슬라이드 {idx + 1}</p>
+                  </div>
+                  <div className="flex-1">
+                    <div className="mb-1 flex items-center justify-between">
+                      <label className="text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
+                        강의 대본 (편집 가능)
+                      </label>
+                      {lectureText && (
+                        <button
+                          onClick={() => copyToClipboard(lectureText, () => {})}
+                          className="rounded border border-zinc-300 dark:border-zinc-700 px-2 py-0.5 text-[10px] hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                        >
+                          복사
+                        </button>
+                      )}
+                    </div>
+                    <textarea
+                      value={lectureText}
+                      onChange={(e) =>
+                        setLectureScripts((prev) => ({ ...prev, [idx]: e.target.value }))
+                      }
+                      rows={6}
+                      placeholder="이 슬라이드를 보면서 짱샘이 직접 설명하는 대본 — 위에서 자동 생성하거나 직접 입력"
+                      className="w-full rounded border border-zinc-300 dark:border-zinc-700 bg-transparent px-3 py-2 text-xs leading-6 placeholder:text-zinc-400 dark:placeholder:text-zinc-600"
+                    />
+                    {lectureText && (
+                      <p className="mt-1 text-[10px] text-zinc-500">
+                        {lectureText.length}자 — 약 {Math.round(lectureText.length / 4)}초 발화 (한국어 평균 4자/초 기준)
+                      </p>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
+      <section className="mb-6 rounded-lg border border-zinc-200 dark:border-zinc-800 p-4">
+        <h2 className="mb-3 text-sm font-semibold">
+          7. 음성 합성 (TTS — 자동 합성용)
           {jobId && (
             <span className="ml-2 text-xs font-normal text-zinc-500">job: {jobId}</span>
           )}
@@ -1410,9 +1644,10 @@ export default function Home() {
 
       <section className="mb-6 rounded-lg border border-zinc-200 dark:border-zinc-800 p-4">
         <h2 className="mb-3 text-sm font-semibold">
-          7. MP4 합성
+          8. MP4 합성 (TTS 경로 전용)
           <span className="ml-2 text-xs font-normal text-zinc-500">
             슬라이드 PNG + 라인 오디오 → 1920×1080 MP4 (ffmpeg). 자막은 vrew에서 추가.
+            직접 녹음(OBS) 흐름이면 이 단계는 건너뛰고 PowerPoint+OBS로 진행.
           </span>
         </h2>
 
@@ -1430,7 +1665,7 @@ export default function Home() {
         {parsed.slideCount > 0 && allSlideImagesReady && !allAudioReady && (
           <div className="mb-3 rounded bg-amber-50 dark:bg-amber-950 p-3 text-xs text-amber-800 dark:text-amber-200">
             모든 라인 음성이 합성되어야 합니다 ({doneCount}/{parsed.lines.length}).
-            6번에서 합성을 완료하세요.
+            7번에서 합성을 완료하세요.
           </div>
         )}
 
