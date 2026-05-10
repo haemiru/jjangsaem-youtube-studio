@@ -115,6 +115,14 @@ export default function Home() {
   } | null>(null);
   const [lecturePromptCopied, setLecturePromptCopied] = useState(false);
   const [lectureManualPaste, setLectureManualPaste] = useState('');
+  const [forceShowTTS, setForceShowTTS] = useState(false);
+
+  // 강의 대본을 받으면(=녹음 흐름) TTS·MP4 섹션 자동 숨김
+  const hasLectureScripts = useMemo(
+    () => Object.values(lectureScripts).some((s) => s && s.trim().length > 10),
+    [lectureScripts]
+  );
+  const showTTSSections = !hasLectureScripts || forceShowTTS;
 
   // Phase C — ffmpeg MP4 렌더 잡 폴링
   type RenderStatus =
@@ -1354,6 +1362,14 @@ export default function Home() {
           </span>
         </h2>
 
+        {mode === 'dialogue' && (
+          <div className="mb-3 rounded bg-amber-50 dark:bg-amber-950 p-2 text-[11px] text-amber-800 dark:text-amber-200">
+            ℹ️ 위 1번에서 <strong>대화 모드</strong>로 대본을 작성했어도 강의 대본은 1인 강의(짱샘 단독)로 자동 변환됩니다.
+            부모 라인의 걱정·고민은 강의에서 &ldquo;어머님들 이런 질문 자주 하시잖아요&rdquo; 식으로 흡수되고,
+            짱샘 답변은 본문으로 풀어쓰여집니다. 처음부터 강의용이면 1번에서 &ldquo;1인 설명&rdquo; 모드를 고르는 게 더 깔끔.
+          </div>
+        )}
+
         <div className="mb-3 flex flex-wrap items-center gap-3">
           <div className="inline-flex rounded border border-zinc-300 dark:border-zinc-700 text-xs">
             <button
@@ -1514,11 +1530,36 @@ export default function Home() {
         )}
       </section>
 
+      {!showTTSSections && (
+        <section className="mb-6 rounded-lg border border-dashed border-zinc-300 dark:border-zinc-700 p-4">
+          <p className="text-xs text-zinc-600 dark:text-zinc-400">
+            🎙️ 강의(녹음) 흐름이라 TTS·MP4 단계는 숨겼어요. PowerPoint 노트에 강의 대본 붙여넣고
+            녹화하면 끝.
+          </p>
+          <button
+            onClick={() => setForceShowTTS(true)}
+            className="mt-2 rounded border border-zinc-300 dark:border-zinc-700 px-3 py-1 text-[11px] hover:bg-zinc-100 dark:hover:bg-zinc-800"
+          >
+            그래도 7·8번 (TTS·MP4) 보기
+          </button>
+        </section>
+      )}
+
+      {showTTSSections && (
+      <>
       <section className="mb-6 rounded-lg border border-zinc-200 dark:border-zinc-800 p-4">
         <h2 className="mb-3 text-sm font-semibold">
           7. 음성 합성 (TTS — 자동 합성용)
           {jobId && (
             <span className="ml-2 text-xs font-normal text-zinc-500">job: {jobId}</span>
+          )}
+          {hasLectureScripts && (
+            <button
+              onClick={() => setForceShowTTS(false)}
+              className="ml-3 rounded border border-zinc-300 dark:border-zinc-700 px-2 py-0.5 text-[10px] font-normal hover:bg-zinc-100 dark:hover:bg-zinc-800"
+            >
+              7·8번 숨기기
+            </button>
           )}
         </h2>
 
@@ -1787,6 +1828,8 @@ export default function Home() {
           </div>
         )}
       </section>
+      </>
+      )}
     </main>
   );
 }
