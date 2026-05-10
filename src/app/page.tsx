@@ -723,7 +723,15 @@ export default function Home() {
   return (
     <main className="mx-auto max-w-5xl px-6 py-10 font-sans text-zinc-900 dark:text-zinc-100">
       <header className="mb-8">
-        <h1 className="text-2xl font-bold tracking-tight">짱샘 유튜브 스튜디오</h1>
+        <h1
+          onClick={() => {
+            if (typeof window !== 'undefined') window.location.reload();
+          }}
+          title="클릭하면 새로고침"
+          className="cursor-pointer text-2xl font-bold tracking-tight hover:opacity-70"
+        >
+          짱샘 유튜브 스튜디오
+        </h1>
         <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
           영상 주제 → 리서치 → 대본 → 슬라이드 → 음성 → MP4 자동 생성
         </p>
@@ -1830,7 +1838,43 @@ export default function Home() {
       </section>
       </>
       )}
+
+      <BackToTopButton />
     </main>
+  );
+}
+
+function BackToTopButton() {
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onScroll = () => setVisible(window.scrollY > 400);
+    onScroll();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, []);
+  if (!visible) return null;
+  return (
+    <button
+      onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+      title="맨 위로"
+      aria-label="맨 위로"
+      className="fixed bottom-6 right-6 z-50 flex h-12 w-12 items-center justify-center rounded-full bg-zinc-900 text-white shadow-lg transition hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+    >
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width="20"
+        height="20"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <polyline points="18 15 12 9 6 15" />
+      </svg>
+    </button>
   );
 }
 
