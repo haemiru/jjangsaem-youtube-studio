@@ -1174,6 +1174,38 @@ export default function Home() {
           </div>
         )}
 
+        {jobId && Object.keys(slideImages).length > 0 && (
+          <div className="mb-3 rounded border border-fuchsia-200 dark:border-fuchsia-900 bg-fuchsia-50 dark:bg-fuchsia-950 p-3 text-[11px]">
+            <div className="font-medium text-fuchsia-900 dark:text-fuchsia-100">
+              📂 PNG 파일 위치 (PowerPoint에 끌어넣기)
+            </div>
+            <div className="mt-1 flex items-center gap-2">
+              <code className="flex-1 break-all rounded bg-white dark:bg-zinc-900 px-2 py-1 font-mono text-[11px]">
+                {`${typeof window !== 'undefined' ? window.location.origin : ''}/slides/${jobId}/`}
+              </code>
+              <button
+                onClick={() =>
+                  copyToClipboard(
+                    `${typeof window !== 'undefined' ? window.location.origin : ''}/slides/${jobId}/`,
+                    () => {}
+                  )
+                }
+                className="rounded border border-fuchsia-300 dark:border-fuchsia-800 px-2 py-1 hover:bg-fuchsia-100 dark:hover:bg-fuchsia-900"
+              >
+                URL 복사
+              </button>
+            </div>
+            <p className="mt-2 text-fuchsia-800 dark:text-fuchsia-200">
+              💡 Windows 탐색기에서{' '}
+              <code className="rounded bg-white dark:bg-zinc-900 px-1 py-0.5 font-mono">
+                C:\Users\bsuha\Claude-prj\jjangsaem-youtube-studio\public\slides\{jobId}\
+              </code>{' '}
+              경로 열어서 PNG들을 PowerPoint로 드래그하면 한 번에 슬라이드 8장 생성됨. 또는 아래
+              카드에서 슬라이드별 [PNG 다운로드] 클릭.
+            </p>
+          </div>
+        )}
+
         {parsed.slideCount === 0 ? (
           <div className="rounded bg-amber-50 dark:bg-amber-950 p-3 text-xs text-amber-800 dark:text-amber-200">
             아직 대본이 없거나 파싱된 슬라이드가 0개입니다. 위 3번 섹션에서 대본을 먼저 작성하세요.
@@ -1248,6 +1280,15 @@ export default function Home() {
                         className="hidden"
                       />
                     </label>
+                    {imgUrl && (
+                      <a
+                        href={imgUrl}
+                        download={`slide-${String(idx + 1).padStart(3, '0')}.png`}
+                        className="rounded border border-emerald-300 dark:border-emerald-800 px-2 py-1 text-[11px] text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950"
+                      >
+                        PNG 다운로드
+                      </a>
+                    )}
                     <button
                       onClick={() => handleSlideImagePrompt(idx)}
                       disabled={
