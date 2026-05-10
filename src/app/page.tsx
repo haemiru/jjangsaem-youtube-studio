@@ -1350,7 +1350,7 @@ export default function Home() {
           6. 직접 녹음용 강의 대본
           <span className="ml-2 text-xs font-normal text-zinc-500">
             (옵션) PowerPoint 녹화용. 자동 생성은 5번 슬라이드 PNG를 Claude Vision으로 직접 보고
-            2단계 검토(호칭 남발·AI 티·이미지 정합) 후 최종본 출력. 이걸로 가면 7·8번 스킵 가능.
+            2단계 검토(호칭 남발·AI 티·이미지 정합·구어체) 후 최종본 출력. 이걸로 가면 7·8번 스킵 가능.
           </span>
         </h2>
 
