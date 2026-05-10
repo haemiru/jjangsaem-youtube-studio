@@ -1,4 +1,5 @@
 export type Speaker = 'jjangsaem' | 'parent';
+export type ParseMode = 'dialogue' | 'solo';
 
 export interface ScriptLine {
   speaker: Speaker;
@@ -21,7 +22,7 @@ const LABEL = /^\[\s*(부모|엄마|아빠|호스트|짱샘)\s*(?::\s*([^\]]+?))
 
 const PARENT_ALIASES = new Set(['부모', '엄마', '아빠', '호스트']);
 
-export function parseScript(input: string): ParsedScript {
+export function parseScript(input: string, mode: ParseMode = 'dialogue'): ParsedScript {
   const lines = input.replace(/\r\n/g, '\n').split('\n');
   const out: ScriptLine[] = [];
   const errors: string[] = [];
@@ -42,7 +43,21 @@ export function parseScript(input: string): ParsedScript {
 
     const labelMatch = trimmed.match(LABEL);
     if (!labelMatch) {
-      // 라벨 없는 본문 — 직전 라인에 이어붙임
+      // solo 모드: 라벨 없는 줄 = 새로운 짱샘 라인
+      if (mode === 'solo') {
+        if (slideIdx < 0) {
+          errors.push(`L${i + 1}: 슬라이드 헤더(예: "## 슬라이드 1") 전에 대사가 나옴`);
+          continue;
+        }
+        out.push({
+          speaker: 'jjangsaem',
+          text: trimmed,
+          slideIdx,
+          rawLineNo: i + 1,
+        });
+        continue;
+      }
+      // dialogue 모드: 라벨 없는 줄 — 직전 라인에 이어붙임
       if (out.length > 0 && slideIdx === out[out.length - 1].slideIdx) {
         out[out.length - 1].text += ' ' + trimmed;
       } else {

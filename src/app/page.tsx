@@ -27,12 +27,12 @@ const PLACEHOLDER_DIALOGUE = `## 슬라이드 1
 [짱샘] 한 가지만 기억하시면 돼요.`;
 
 const PLACEHOLDER_SOLO = `## 슬라이드 1
-[짱샘] 어머님들, 오늘은 ... 얘기를 해볼게요.
-[짱샘] 한 가지만 기억하시면 됩니다.
+어머님들, 오늘은 ... 얘기를 해볼게요.
+한 가지만 기억하시면 됩니다.
 
 ## 슬라이드 2
-[짱샘] 그게 보통은요...
-[짱샘] 어머님 잘하고 계세요.`;
+그게 보통은요...
+어머님 잘하고 계세요.`;
 
 type ParentGender = 'mom' | 'dad';
 type ScriptMode = 'dialogue' | 'solo';
@@ -183,7 +183,7 @@ export default function Home() {
     );
   }, [geminiVoiceJjangsaem, geminiVoiceMom, geminiVoiceDad]);
 
-  const parsed = useMemo(() => parseScript(script), [script]);
+  const parsed = useMemo(() => parseScript(script, mode), [script, mode]);
   const validation = useMemo(() => validateScript(parsed, mode), [parsed, mode]);
 
   useEffect(() => {
