@@ -498,6 +498,13 @@ export default function Home() {
     setLectureError(null);
     setLectureGenerating(true);
     try {
+      // 슬라이드 이미지 URL을 함께 전달 — Claude Vision이 실제 PNG 보고 정합성 맞추도록
+      const slideImagesPayload: Record<string, string> = {};
+      for (let i = 0; i < parsed.slideCount; i++) {
+        const u = slideImages[i];
+        if (u) slideImagesPayload[String(i)] = u.split('?')[0];
+      }
+
       const res = await fetch('/api/lecture-scripts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -506,6 +513,9 @@ export default function Home() {
           script,
           scriptMode: mode,
           research: research.trim() || undefined,
+          slideImages: Object.keys(slideImagesPayload).length > 0
+            ? slideImagesPayload
+            : undefined,
         }),
       });
       const data = await res.json();
@@ -1339,8 +1349,8 @@ export default function Home() {
         <h2 className="mb-3 text-sm font-semibold">
           6. 직접 녹음용 강의 대본
           <span className="ml-2 text-xs font-normal text-zinc-500">
-            (옵션) PowerPoint + OBS 흐름. 자동 생성 시 2단계 검토(호칭 남발·AI 티·슬라이드 정합) 후 최종본 출력.
-            이걸로 가면 7·8번 스킵 가능.
+            (옵션) PowerPoint 녹화용. 자동 생성은 5번 슬라이드 PNG를 Claude Vision으로 직접 보고
+            2단계 검토(호칭 남발·AI 티·이미지 정합) 후 최종본 출력. 이걸로 가면 7·8번 스킵 가능.
           </span>
         </h2>
 

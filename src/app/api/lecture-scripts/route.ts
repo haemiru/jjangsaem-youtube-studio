@@ -1,5 +1,7 @@
 import type { NextRequest } from 'next/server';
-import { generate } from '@/lib/anthropic';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { generate, generateWithImages, type SlideImage } from '@/lib/anthropic';
 import { parseScript } from '@/lib/script-parser';
 import {
   buildLecturePrompt,
@@ -8,17 +10,54 @@ import {
 } from '@/lib/lecture-prompts';
 
 export const runtime = 'nodejs';
-export const maxDuration = 300;
+export const maxDuration = 600;
 
 interface LectureScriptsBody {
   topic: string;
   script: string; // 기존 TTS 대본 (## 슬라이드 N 헤더 포함)
   scriptMode?: 'dialogue' | 'solo';
   research?: string;
+  /** {slideIdx: imageUrl} — 5번 섹션의 slideImages map 그대로 */
+  slideImages?: Record<string, string>;
 }
 
 const SCRIPT_LIMIT = 30_000;
 const RESEARCH_LIMIT = 10_000;
+
+function urlToFsPath(url: string): string | null {
+  if (!url.startsWith('/slides/')) return null;
+  const clean = url.split('?')[0];
+  if (clean.includes('..')) return null;
+  return path.join(process.cwd(), 'public', clean.replace(/\//g, path.sep));
+}
+
+function detectMediaType(p: string): SlideImage['mediaType'] {
+  const lower = p.toLowerCase();
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  return 'image/png';
+}
+
+async function loadSlideImages(
+  slideImages: Record<string, string> | undefined,
+  slideCount: number
+): Promise<SlideImage[]> {
+  if (!slideImages) return [];
+  const out: SlideImage[] = [];
+  for (let i = 0; i < slideCount; i++) {
+    const url = slideImages[String(i)] ?? slideImages[i as unknown as string];
+    if (!url) continue;
+    const fsPath = urlToFsPath(url);
+    if (!fsPath) continue;
+    try {
+      const data = await readFile(fsPath);
+      out.push({ idx: i, data, mediaType: detectMediaType(fsPath) });
+    } catch {
+      // 파일 없으면 건너뜀 — 모델이 컨텍스트 없이 진행
+    }
+  }
+  return out;
+}
 
 export async function POST(request: NextRequest) {
   let body: LectureScriptsBody;
@@ -47,6 +86,10 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // 슬라이드 이미지 로드 (있으면 vision으로, 없으면 텍스트만)
+  const slides = await loadSlideImages(body.slideImages, parsed.slideCount);
+  const useVision = slides.length > 0;
+
   try {
     // 1차 — 강의 대본 생성
     const { system: system1, user: user1 } = buildLecturePrompt({
@@ -54,11 +97,14 @@ export async function POST(request: NextRequest) {
       parsed,
       research,
     });
-    const draft = await generate({
-      system: system1,
-      user: user1,
-      maxTokens: 8000,
-    });
+    const draft = useVision
+      ? await generateWithImages({
+          system: system1,
+          user: user1,
+          slides,
+          maxTokens: 8000,
+        })
+      : await generate({ system: system1, user: user1, maxTokens: 8000 });
 
     // 2차 — 자체 검토·수정 (호칭 남발 / AI 티 / 슬라이드 정합 / 어려운 용어)
     const { system: system2, user: user2 } = buildLectureCritiquePrompt({
@@ -66,11 +112,14 @@ export async function POST(request: NextRequest) {
       parsed,
       draft,
     });
-    const revised = await generate({
-      system: system2,
-      user: user2,
-      maxTokens: 8000,
-    });
+    const revised = useVision
+      ? await generateWithImages({
+          system: system2,
+          user: user2,
+          slides,
+          maxTokens: 8000,
+        })
+      : await generate({ system: system2, user: user2, maxTokens: 8000 });
 
     const byIdx = parseLectureScript(revised);
     const filled: Record<number, string> = {};
@@ -80,7 +129,8 @@ export async function POST(request: NextRequest) {
     return Response.json({
       slideCount: parsed.slideCount,
       scripts: filled,
-      // 디버깅용 — 1차 초안도 같이 반환 (UI에선 안 보여줌)
+      usedVision: useVision,
+      slideImagesLoaded: slides.length,
       draft,
       revised,
     });
