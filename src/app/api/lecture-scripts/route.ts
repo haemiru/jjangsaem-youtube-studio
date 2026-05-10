@@ -1,10 +1,14 @@
 import type { NextRequest } from 'next/server';
 import { generate } from '@/lib/anthropic';
 import { parseScript } from '@/lib/script-parser';
-import { buildLecturePrompt, parseLectureScript } from '@/lib/lecture-prompts';
+import {
+  buildLecturePrompt,
+  buildLectureCritiquePrompt,
+  parseLectureScript,
+} from '@/lib/lecture-prompts';
 
 export const runtime = 'nodejs';
-export const maxDuration = 180;
+export const maxDuration = 300;
 
 interface LectureScriptsBody {
   topic: string;
@@ -44,13 +48,31 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const { system, user } = buildLecturePrompt({
+    // 1차 — 강의 대본 생성
+    const { system: system1, user: user1 } = buildLecturePrompt({
       topic,
       parsed,
       research,
     });
-    const raw = await generate({ system, user, maxTokens: 8000, temperature: 0.7 });
-    const byIdx = parseLectureScript(raw);
+    const draft = await generate({
+      system: system1,
+      user: user1,
+      maxTokens: 8000,
+    });
+
+    // 2차 — 자체 검토·수정 (호칭 남발 / AI 티 / 슬라이드 정합 / 어려운 용어)
+    const { system: system2, user: user2 } = buildLectureCritiquePrompt({
+      topic,
+      parsed,
+      draft,
+    });
+    const revised = await generate({
+      system: system2,
+      user: user2,
+      maxTokens: 8000,
+    });
+
+    const byIdx = parseLectureScript(revised);
     const filled: Record<number, string> = {};
     for (let i = 0; i < parsed.slideCount; i++) {
       filled[i] = byIdx[i] ?? '';
@@ -58,7 +80,9 @@ export async function POST(request: NextRequest) {
     return Response.json({
       slideCount: parsed.slideCount,
       scripts: filled,
-      raw,
+      // 디버깅용 — 1차 초안도 같이 반환 (UI에선 안 보여줌)
+      draft,
+      revised,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

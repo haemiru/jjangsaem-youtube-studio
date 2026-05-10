@@ -1298,7 +1298,8 @@ export default function Home() {
         <h2 className="mb-3 text-sm font-semibold">
           6. 직접 녹음용 강의 대본
           <span className="ml-2 text-xs font-normal text-zinc-500">
-            (옵션) PowerPoint + OBS로 짱샘이 직접 강의·녹음할 때 쓰는 대본. TTS만 쓸 거면 건너뛰어도 됨.
+            (옵션) PowerPoint + OBS 흐름. 자동 생성 시 2단계 검토(호칭 남발·AI 티·슬라이드 정합) 후 최종본 출력.
+            이걸로 가면 7·8번 스킵 가능.
           </span>
         </h2>
 
@@ -1323,7 +1324,9 @@ export default function Home() {
               disabled={!topic.trim() || !script.trim() || lectureGenerating}
               className="rounded bg-orange-600 px-4 py-2 text-sm text-white hover:bg-orange-500 disabled:bg-zinc-400 disabled:cursor-not-allowed"
             >
-              {lectureGenerating ? '강의 대본 생성 중...' : '전체 강의 대본 생성 (Claude)'}
+              {lectureGenerating
+                ? '강의 대본 생성 + 검토 중... (1~2분)'
+                : '전체 강의 대본 생성 (Claude)'}
             </button>
           ) : (
             <button
