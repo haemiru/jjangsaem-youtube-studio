@@ -9,6 +9,7 @@ import {
   buildLecturePrompt,
   parseLectureScript,
 } from '@/lib/lecture-prompts';
+import { buildThumbnailPrompt } from '@/lib/thumbnail-prompts';
 import { GEMINI_VOICES, GEMINI_DEFAULT_VOICE } from '@/lib/gemini-voices';
 
 type TTSProvider = 'supertone' | 'gemini';
@@ -115,6 +116,18 @@ export default function Home() {
   } | null>(null);
   const [lecturePromptCopied, setLecturePromptCopied] = useState(false);
   const [lectureManualPaste, setLectureManualPaste] = useState('');
+
+  // 7번 — 썸네일 프롬프트 (Google Flow용)
+  const [thumbnailUseApi, setThumbnailUseApi] = useState(true);
+  const [thumbnailGenerating, setThumbnailGenerating] = useState(false);
+  const [thumbnailError, setThumbnailError] = useState('');
+  const [thumbnailResult, setThumbnailResult] = useState(''); // Flow에 붙여넣을 최종 한국어 프롬프트
+  const [thumbnailResultCopied, setThumbnailResultCopied] = useState(false);
+  const [thumbnailManualPrompt, setThumbnailManualPrompt] = useState<{
+    system: string;
+    user: string;
+  } | null>(null);
+  const [thumbnailManualCopied, setThumbnailManualCopied] = useState(false);
   const [forceShowTTS, setForceShowTTS] = useState(false);
 
   // 강의 대본을 받으면(=녹음 흐름) TTS·MP4 섹션 자동 숨김
@@ -569,6 +582,47 @@ export default function Home() {
       filled[i] = byIdx[i] ?? '';
     }
     setLectureScripts(filled);
+  }
+
+  // 7번 — 썸네일 프롬프트 (API 호출 모드: Claude가 직접 Flow 프롬프트 생성)
+  async function handleGenerateThumbnailPrompt() {
+    if (!topic.trim()) return;
+    setThumbnailGenerating(true);
+    setThumbnailError('');
+    setThumbnailResult('');
+    setThumbnailResultCopied(false);
+    try {
+      const res = await fetch('/api/thumbnail-prompt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          topic: topic.trim(),
+          lectureScripts,
+          research: research.trim() || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.message || data?.error || `HTTP ${res.status}`);
+      }
+      setThumbnailResult(typeof data.prompt === 'string' ? data.prompt.trim() : '');
+    } catch (err) {
+      setThumbnailError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setThumbnailGenerating(false);
+    }
+  }
+
+  // 7번 — 썸네일 프롬프트 (수동 모드: Claude.ai 웹에 붙여넣을 메타 프롬프트만 생성)
+  function buildThumbnailPromptForManual() {
+    if (!topic.trim()) return;
+    const { system, user } = buildThumbnailPrompt({
+      topic: topic.trim(),
+      lectureScripts,
+      research: research.trim() || undefined,
+    });
+    setThumbnailManualPrompt({ system, user });
+    setThumbnailManualCopied(false);
   }
 
   async function handleSlideImagePrompt(slideIdx: number) {
@@ -1375,7 +1429,7 @@ export default function Home() {
           6. 직접 녹음용 강의 대본
           <span className="ml-2 text-xs font-normal text-zinc-500">
             (옵션) PowerPoint 녹화용. 자동 생성은 5번 슬라이드 PNG를 Claude Vision으로 직접 보고
-            2단계 검토(호칭 남발·AI 티·이미지 정합·구어체) 후 최종본 출력. 이걸로 가면 7·8번 스킵 가능.
+            2단계 검토(호칭 남발·AI 티·이미지 정합·구어체) 후 최종본 출력. 이걸로 가면 8·9번 스킵 가능.
           </span>
         </h2>
 
@@ -1547,6 +1601,122 @@ export default function Home() {
         )}
       </section>
 
+      {/* 7. 썸네일 프롬프트 — Google Flow용 */}
+      <section className="mb-6 rounded-lg border border-zinc-200 dark:border-zinc-800 p-4">
+        <h2 className="mb-3 text-sm font-semibold">
+          7. 썸네일 프롬프트 (Google Flow용)
+          <span className="ml-2 text-xs font-normal text-zinc-500">
+            6번 강의 대본 전체를 읽고 가장 강한 클릭 후크를 뽑아, Google Flow에 그대로 붙여넣을
+            한국어 이미지 생성 프롬프트를 출력. Flow가 한글 텍스트를 잘 렌더링하므로 헤드라인 한글이 포함됨.
+          </span>
+        </h2>
+
+        <div className="mb-3 flex flex-wrap items-center gap-3">
+          <div className="inline-flex rounded border border-zinc-300 dark:border-zinc-700 text-xs">
+            <button
+              onClick={() => setThumbnailUseApi(true)}
+              className={`px-3 py-1.5 ${thumbnailUseApi ? 'bg-fuchsia-600 text-white' : 'text-zinc-600 dark:text-zinc-400'}`}
+            >
+              API 호출
+            </button>
+            <button
+              onClick={() => setThumbnailUseApi(false)}
+              className={`px-3 py-1.5 ${!thumbnailUseApi ? 'bg-fuchsia-600 text-white' : 'text-zinc-600 dark:text-zinc-400'}`}
+            >
+              수동 (Claude.ai 웹)
+            </button>
+          </div>
+          {thumbnailUseApi ? (
+            <button
+              onClick={handleGenerateThumbnailPrompt}
+              disabled={
+                !topic.trim() ||
+                thumbnailGenerating ||
+                !Object.values(lectureScripts).some((s) => (s ?? '').trim())
+              }
+              className="rounded bg-fuchsia-600 px-4 py-2 text-sm text-white hover:bg-fuchsia-500 disabled:bg-zinc-400 disabled:cursor-not-allowed"
+            >
+              {thumbnailGenerating ? '생성 중... (10~30초)' : 'Flow 프롬프트 생성'}
+            </button>
+          ) : (
+            <button
+              onClick={buildThumbnailPromptForManual}
+              disabled={
+                !topic.trim() ||
+                !Object.values(lectureScripts).some((s) => (s ?? '').trim())
+              }
+              className="rounded bg-fuchsia-600 px-4 py-2 text-sm text-white hover:bg-fuchsia-500 disabled:bg-zinc-400 disabled:cursor-not-allowed"
+            >
+              프롬프트 생성
+            </button>
+          )}
+          {!Object.values(lectureScripts).some((s) => (s ?? '').trim()) && (
+            <span className="text-xs text-amber-700 dark:text-amber-300">
+              6번 강의 대본을 먼저 생성하세요
+            </span>
+          )}
+        </div>
+
+        {thumbnailError && (
+          <div className="mb-3 rounded bg-red-50 dark:bg-red-950 p-3 text-xs text-red-800 dark:text-red-200">
+            {thumbnailError}
+          </div>
+        )}
+
+        {!thumbnailUseApi && thumbnailManualPrompt && (
+          <div className="mb-3 rounded border border-fuchsia-300 dark:border-fuchsia-800 bg-fuchsia-50 dark:bg-fuchsia-950 p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-xs font-medium text-fuchsia-900 dark:text-fuchsia-100">
+                Claude.ai 웹에 붙여넣고 응답(=Flow 프롬프트)을 Google Flow에 다시 붙여넣으세요
+              </span>
+              <button
+                onClick={() =>
+                  copyToClipboard(combinedPromptText(thumbnailManualPrompt), () =>
+                    setThumbnailManualCopied(true)
+                  )
+                }
+                className="rounded bg-fuchsia-600 px-3 py-1 text-xs text-white hover:bg-fuchsia-500"
+              >
+                {thumbnailManualCopied ? '복사됨 ✓' : '프롬프트 복사'}
+              </button>
+            </div>
+            <textarea
+              readOnly
+              value={combinedPromptText(thumbnailManualPrompt)}
+              rows={8}
+              className="w-full rounded border border-fuchsia-300 dark:border-fuchsia-800 bg-white dark:bg-zinc-900 px-3 py-2 font-mono text-[11px] leading-5"
+            />
+          </div>
+        )}
+
+        {thumbnailResult && (
+          <div className="rounded border border-fuchsia-300 dark:border-fuchsia-800 bg-fuchsia-50 dark:bg-fuchsia-950 p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-xs font-medium text-fuchsia-900 dark:text-fuchsia-100">
+                Google Flow에 그대로 붙여넣으세요
+              </span>
+              <button
+                onClick={() =>
+                  copyToClipboard(thumbnailResult, () => setThumbnailResultCopied(true))
+                }
+                className="rounded bg-fuchsia-600 px-3 py-1 text-xs text-white hover:bg-fuchsia-500"
+              >
+                {thumbnailResultCopied ? '복사됨 ✓' : 'Flow 프롬프트 복사'}
+              </button>
+            </div>
+            <textarea
+              value={thumbnailResult}
+              onChange={(e) => setThumbnailResult(e.target.value)}
+              rows={10}
+              className="w-full rounded border border-fuchsia-300 dark:border-fuchsia-800 bg-white dark:bg-zinc-900 px-3 py-2 text-xs leading-6"
+            />
+            <p className="mt-1 text-[10px] text-fuchsia-700 dark:text-fuchsia-300">
+              필요하면 직접 편집한 뒤 Flow에 붙여넣으세요. 한글 헤드라인 카피는 Flow가 잘 렌더링합니다.
+            </p>
+          </div>
+        )}
+      </section>
+
       {!showTTSSections && (
         <section className="mb-6 rounded-lg border border-dashed border-zinc-300 dark:border-zinc-700 p-4">
           <p className="text-xs text-zinc-600 dark:text-zinc-400">
@@ -1557,7 +1727,7 @@ export default function Home() {
             onClick={() => setForceShowTTS(true)}
             className="mt-2 rounded border border-zinc-300 dark:border-zinc-700 px-3 py-1 text-[11px] hover:bg-zinc-100 dark:hover:bg-zinc-800"
           >
-            그래도 7·8번 (TTS·MP4) 보기
+            그래도 8·9번 (TTS·MP4) 보기
           </button>
         </section>
       )}
@@ -1566,7 +1736,7 @@ export default function Home() {
       <>
       <section className="mb-6 rounded-lg border border-zinc-200 dark:border-zinc-800 p-4">
         <h2 className="mb-3 text-sm font-semibold">
-          7. 음성 합성 (TTS — 자동 합성용)
+          8. 음성 합성 (TTS — 자동 합성용)
           {jobId && (
             <span className="ml-2 text-xs font-normal text-zinc-500">job: {jobId}</span>
           )}
@@ -1575,7 +1745,7 @@ export default function Home() {
               onClick={() => setForceShowTTS(false)}
               className="ml-3 rounded border border-zinc-300 dark:border-zinc-700 px-2 py-0.5 text-[10px] font-normal hover:bg-zinc-100 dark:hover:bg-zinc-800"
             >
-              7·8번 숨기기
+              8·9번 숨기기
             </button>
           )}
         </h2>
@@ -1756,7 +1926,7 @@ export default function Home() {
 
       <section className="mb-6 rounded-lg border border-zinc-200 dark:border-zinc-800 p-4">
         <h2 className="mb-3 text-sm font-semibold">
-          8. MP4 합성 (TTS 경로 전용)
+          9. MP4 합성 (TTS 경로 전용)
           <span className="ml-2 text-xs font-normal text-zinc-500">
             슬라이드 PNG + 라인 오디오 → 1920×1080 MP4 (ffmpeg). 자막은 vrew에서 추가.
             직접 녹음(OBS) 흐름이면 이 단계는 건너뛰고 PowerPoint+OBS로 진행.
