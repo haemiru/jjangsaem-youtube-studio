@@ -10,6 +10,13 @@ import {
   parseLectureScript,
 } from '@/lib/lecture-prompts';
 import { buildThumbnailPrompt } from '@/lib/thumbnail-prompts';
+import {
+  buildUploadMetaPrompt,
+  parseUploadMetaJSON,
+  applyChannelLinksPostProcess,
+  UPLOAD_META_MANUAL_PREFIX,
+  type UploadMetaJson,
+} from '@/lib/upload-meta-prompts';
 import { GEMINI_VOICES, GEMINI_DEFAULT_VOICE } from '@/lib/gemini-voices';
 
 type TTSProvider = 'supertone' | 'gemini';
@@ -128,6 +135,26 @@ export default function Home() {
     user: string;
   } | null>(null);
   const [thumbnailManualCopied, setThumbnailManualCopied] = useState(false);
+
+  // 8번 — YouTube 업로드용 메타데이터 (제목·디스크립션·태그)
+  const [uploadMetaUseApi, setUploadMetaUseApi] = useState(true);
+  const [uploadMetaGenerating, setUploadMetaGenerating] = useState(false);
+  const [uploadMetaError, setUploadMetaError] = useState('');
+  const [uploadMeta, setUploadMeta] = useState<UploadMetaJson | null>(null);
+  const [uploadMetaManualPrompt, setUploadMetaManualPrompt] = useState<{
+    system: string;
+    user: string;
+  } | null>(null);
+  const [uploadMetaManualPaste, setUploadMetaManualPaste] = useState('');
+  const [uploadMetaManualError, setUploadMetaManualError] = useState('');
+  const [uploadMetaManualPromptCopied, setUploadMetaManualPromptCopied] = useState(false);
+  const [uploadMetaCopied, setUploadMetaCopied] = useState<{
+    title: boolean;
+    description: boolean;
+    tags: boolean;
+    hashtags: boolean;
+  }>({ title: false, description: false, tags: false, hashtags: false });
+  const [uploadMetaNewTag, setUploadMetaNewTag] = useState('');
   const [forceShowTTS, setForceShowTTS] = useState(false);
 
   // 강의 대본을 받으면(=녹음 흐름) TTS·MP4 섹션 자동 숨김
@@ -623,6 +650,108 @@ export default function Home() {
     });
     setThumbnailManualPrompt({ system, user });
     setThumbnailManualCopied(false);
+  }
+
+  // 8번 — YouTube 업로드 메타데이터 (API 호출 모드)
+  async function handleGenerateUploadMeta() {
+    if (!topic.trim()) return;
+    setUploadMetaGenerating(true);
+    setUploadMetaError('');
+    try {
+      const res = await fetch('/api/upload-meta', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          topic: topic.trim(),
+          lectureScripts,
+          research: research.trim() || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.message || data?.error || `HTTP ${res.status}`);
+      }
+      setUploadMeta(data.meta as UploadMetaJson);
+    } catch (err) {
+      setUploadMetaError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setUploadMetaGenerating(false);
+    }
+  }
+
+  // 8번 — 수동 모드 프롬프트 생성
+  function buildUploadMetaPromptForManual() {
+    if (!topic.trim()) return;
+    const { system, user } = buildUploadMetaPrompt({
+      topic: topic.trim(),
+      lectureScripts,
+      research: research.trim() || undefined,
+    });
+    setUploadMetaManualPrompt({
+      system,
+      // 수동 모드는 [중요 지시] 접두어로 모델이 JSON만 뱉도록 강제
+      user: UPLOAD_META_MANUAL_PREFIX + user,
+    });
+    setUploadMetaManualPromptCopied(false);
+    setUploadMetaManualError('');
+  }
+
+  // 8번 — 수동 paste 적용
+  function applyUploadMetaManualPaste() {
+    setUploadMetaManualError('');
+    if (!uploadMetaManualPaste.trim()) return;
+    try {
+      const parsed = parseUploadMetaJSON(uploadMetaManualPaste);
+      if (
+        !parsed?.title?.text ||
+        !parsed?.description?.text ||
+        !Array.isArray(parsed?.tags?.list)
+      ) {
+        throw new Error('JSON 구조 검증 실패 (title.text / description.text / tags.list 필요)');
+      }
+      const final = applyChannelLinksPostProcess(parsed);
+      setUploadMeta(final);
+      setUploadMetaManualPaste('');
+    } catch (err) {
+      setUploadMetaManualError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  function copyUploadMetaField(
+    field: 'title' | 'description' | 'tags' | 'hashtags',
+    text: string
+  ) {
+    copyToClipboard(text, () => {
+      setUploadMetaCopied((p) => ({ ...p, [field]: true }));
+      window.setTimeout(() => {
+        setUploadMetaCopied((p) => ({ ...p, [field]: false }));
+      }, 1500);
+    });
+  }
+
+  function uploadMetaAddTag() {
+    const t = uploadMetaNewTag.trim();
+    if (!t || !uploadMeta) return;
+    if (uploadMeta.tags.list.includes(t)) {
+      setUploadMetaNewTag('');
+      return;
+    }
+    setUploadMeta({
+      ...uploadMeta,
+      tags: { ...uploadMeta.tags, list: [...uploadMeta.tags.list, t] },
+    });
+    setUploadMetaNewTag('');
+  }
+
+  function uploadMetaRemoveTag(tag: string) {
+    if (!uploadMeta) return;
+    setUploadMeta({
+      ...uploadMeta,
+      tags: {
+        ...uploadMeta.tags,
+        list: uploadMeta.tags.list.filter((x) => x !== tag),
+      },
+    });
   }
 
   async function handleSlideImagePrompt(slideIdx: number) {
@@ -1429,7 +1558,7 @@ export default function Home() {
           6. 직접 녹음용 강의 대본
           <span className="ml-2 text-xs font-normal text-zinc-500">
             (옵션) PowerPoint 녹화용. 자동 생성은 5번 슬라이드 PNG를 Claude Vision으로 직접 보고
-            2단계 검토(호칭 남발·AI 티·이미지 정합·구어체) 후 최종본 출력. 이걸로 가면 8·9번 스킵 가능.
+            2단계 검토(호칭 남발·AI 티·이미지 정합·구어체) 후 최종본 출력. 이걸로 가면 9·10번 스킵 가능.
           </span>
         </h2>
 
@@ -1717,6 +1846,275 @@ export default function Home() {
         )}
       </section>
 
+      {/* 8. YouTube 업로드용 메타데이터 (제목·디스크립션·태그) */}
+      <section className="mb-6 rounded-lg border border-zinc-200 dark:border-zinc-800 p-4">
+        <h2 className="mb-3 text-sm font-semibold">
+          8. YouTube 업로드 메타데이터 (제목·디스크립션·태그)
+          <span className="ml-2 text-xs font-normal text-zinc-500">
+            6번 강의 대본 전체를 분석해서 SEO 최적화된 제목·디스크립션·태그를 자동 생성. 자기채점 후
+            채널 링크(인스타·블로그·카톡)는 디스크립션 끝에 자동 첨부.
+          </span>
+        </h2>
+
+        <div className="mb-3 flex flex-wrap items-center gap-3">
+          <div className="inline-flex rounded border border-zinc-300 dark:border-zinc-700 text-xs">
+            <button
+              onClick={() => setUploadMetaUseApi(true)}
+              className={`px-3 py-1.5 ${uploadMetaUseApi ? 'bg-emerald-600 text-white' : 'text-zinc-600 dark:text-zinc-400'}`}
+            >
+              API 호출
+            </button>
+            <button
+              onClick={() => setUploadMetaUseApi(false)}
+              className={`px-3 py-1.5 ${!uploadMetaUseApi ? 'bg-emerald-600 text-white' : 'text-zinc-600 dark:text-zinc-400'}`}
+            >
+              수동 (Claude.ai 웹)
+            </button>
+          </div>
+          {uploadMetaUseApi ? (
+            <button
+              onClick={handleGenerateUploadMeta}
+              disabled={
+                !topic.trim() ||
+                uploadMetaGenerating ||
+                !Object.values(lectureScripts).some((s) => (s ?? '').trim())
+              }
+              className="rounded bg-emerald-600 px-4 py-2 text-sm text-white hover:bg-emerald-500 disabled:bg-zinc-400 disabled:cursor-not-allowed"
+            >
+              {uploadMetaGenerating ? '생성 + 자기채점 중... (30~60초)' : '메타데이터 생성 (Claude)'}
+            </button>
+          ) : (
+            <button
+              onClick={buildUploadMetaPromptForManual}
+              disabled={
+                !topic.trim() ||
+                !Object.values(lectureScripts).some((s) => (s ?? '').trim())
+              }
+              className="rounded bg-emerald-600 px-4 py-2 text-sm text-white hover:bg-emerald-500 disabled:bg-zinc-400 disabled:cursor-not-allowed"
+            >
+              프롬프트 생성
+            </button>
+          )}
+          {!Object.values(lectureScripts).some((s) => (s ?? '').trim()) && (
+            <span className="text-xs text-amber-700 dark:text-amber-300">
+              6번 강의 대본을 먼저 생성하세요
+            </span>
+          )}
+        </div>
+
+        {uploadMetaError && (
+          <div className="mb-3 rounded bg-red-50 dark:bg-red-950 p-3 text-xs text-red-800 dark:text-red-200">
+            {uploadMetaError}
+          </div>
+        )}
+
+        {!uploadMetaUseApi && uploadMetaManualPrompt && (
+          <div className="mb-3 rounded border border-emerald-300 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950 p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-xs font-medium text-emerald-900 dark:text-emerald-100">
+                Claude.ai 웹에 붙여넣고 JSON 응답을 아래에 붙여넣으세요
+              </span>
+              <button
+                onClick={() =>
+                  copyToClipboard(combinedPromptText(uploadMetaManualPrompt), () =>
+                    setUploadMetaManualPromptCopied(true)
+                  )
+                }
+                className="rounded bg-emerald-600 px-3 py-1 text-xs text-white hover:bg-emerald-500"
+              >
+                {uploadMetaManualPromptCopied ? '복사됨 ✓' : '프롬프트 복사'}
+              </button>
+            </div>
+            <textarea
+              readOnly
+              value={combinedPromptText(uploadMetaManualPrompt)}
+              rows={8}
+              className="w-full rounded border border-emerald-300 dark:border-emerald-800 bg-white dark:bg-zinc-900 px-3 py-2 font-mono text-[11px] leading-5"
+            />
+            <label className="mt-3 block text-[11px] font-medium text-emerald-900 dark:text-emerald-100">
+              Claude.ai 응답 (JSON) 붙여넣기
+            </label>
+            <textarea
+              value={uploadMetaManualPaste}
+              onChange={(e) => setUploadMetaManualPaste(e.target.value)}
+              rows={6}
+              placeholder={`{\n  "title": { "text": "...", "score": 92 },\n  "description": { "text": "...", "score": 87 },\n  "tags": { "list": ["..."], "score": 89 },\n  "hashtags": ["#..."]\n}`}
+              className="mt-1 w-full rounded border border-emerald-300 dark:border-emerald-800 bg-white dark:bg-zinc-900 px-3 py-2 font-mono text-[11px] leading-5"
+            />
+            {uploadMetaManualError && (
+              <div className="mt-2 text-xs text-red-700 dark:text-red-300">
+                {uploadMetaManualError}
+              </div>
+            )}
+            <button
+              onClick={applyUploadMetaManualPaste}
+              disabled={!uploadMetaManualPaste.trim()}
+              className="mt-2 rounded bg-emerald-600 px-3 py-1.5 text-xs text-white hover:bg-emerald-500 disabled:bg-zinc-400"
+            >
+              결과 적용
+            </button>
+          </div>
+        )}
+
+        {uploadMeta && (
+          <div className="space-y-3">
+            {/* 제목 */}
+            <div className="rounded border border-emerald-200 dark:border-emerald-900 p-3">
+              <div className="mb-2 flex items-center justify-between">
+                <span className="text-xs font-medium">
+                  제목
+                  {typeof uploadMeta.title.score === 'number' && (
+                    <span className="ml-2 rounded bg-emerald-100 dark:bg-emerald-900 px-1.5 py-0.5 text-[10px] text-emerald-800 dark:text-emerald-200">
+                      {uploadMeta.title.score}점
+                    </span>
+                  )}
+                  <span className="ml-2 text-[10px] text-zinc-500">
+                    {uploadMeta.title.text.length}자
+                  </span>
+                </span>
+                <button
+                  onClick={() => copyUploadMetaField('title', uploadMeta.title.text)}
+                  className="rounded border border-zinc-300 dark:border-zinc-700 px-2 py-0.5 text-[10px] hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                >
+                  {uploadMetaCopied.title ? '복사됨 ✓' : '복사'}
+                </button>
+              </div>
+              <input
+                type="text"
+                value={uploadMeta.title.text}
+                onChange={(e) =>
+                  setUploadMeta({
+                    ...uploadMeta,
+                    title: { ...uploadMeta.title, text: e.target.value },
+                  })
+                }
+                className="w-full rounded border border-zinc-300 dark:border-zinc-700 bg-transparent px-3 py-2 text-sm font-semibold"
+              />
+              {uploadMeta.title.improvement_note && (
+                <p className="mt-1 text-[10px] text-zinc-500">
+                  개선 노트: {uploadMeta.title.improvement_note}
+                </p>
+              )}
+            </div>
+
+            {/* 디스크립션 */}
+            <div className="rounded border border-emerald-200 dark:border-emerald-900 p-3">
+              <div className="mb-2 flex items-center justify-between">
+                <span className="text-xs font-medium">
+                  디스크립션
+                  {typeof uploadMeta.description.score === 'number' && (
+                    <span className="ml-2 rounded bg-emerald-100 dark:bg-emerald-900 px-1.5 py-0.5 text-[10px] text-emerald-800 dark:text-emerald-200">
+                      {uploadMeta.description.score}점
+                    </span>
+                  )}
+                  <span className="ml-2 text-[10px] text-zinc-500">
+                    {uploadMeta.description.text.length}자
+                  </span>
+                </span>
+                <button
+                  onClick={() => copyUploadMetaField('description', uploadMeta.description.text)}
+                  className="rounded border border-zinc-300 dark:border-zinc-700 px-2 py-0.5 text-[10px] hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                >
+                  {uploadMetaCopied.description ? '복사됨 ✓' : '복사'}
+                </button>
+              </div>
+              {uploadMeta.description.preview_lines && (
+                <p className="mb-1 text-[10px] text-zinc-500">
+                  미리보기: &ldquo;{uploadMeta.description.preview_lines}&rdquo;
+                </p>
+              )}
+              <textarea
+                value={uploadMeta.description.text}
+                onChange={(e) =>
+                  setUploadMeta({
+                    ...uploadMeta,
+                    description: { ...uploadMeta.description, text: e.target.value },
+                  })
+                }
+                rows={12}
+                className="w-full rounded border border-zinc-300 dark:border-zinc-700 bg-transparent px-3 py-2 text-xs leading-6"
+              />
+            </div>
+
+            {/* 태그 */}
+            <div className="rounded border border-emerald-200 dark:border-emerald-900 p-3">
+              <div className="mb-2 flex items-center justify-between">
+                <span className="text-xs font-medium">
+                  태그 ({uploadMeta.tags.list.length}개 / 약{' '}
+                  {uploadMeta.tags.list.join(',').length}자)
+                  {typeof uploadMeta.tags.score === 'number' && (
+                    <span className="ml-2 rounded bg-emerald-100 dark:bg-emerald-900 px-1.5 py-0.5 text-[10px] text-emerald-800 dark:text-emerald-200">
+                      {uploadMeta.tags.score}점
+                    </span>
+                  )}
+                </span>
+                <button
+                  onClick={() =>
+                    copyUploadMetaField('tags', uploadMeta.tags.list.join(','))
+                  }
+                  className="rounded border border-zinc-300 dark:border-zinc-700 px-2 py-0.5 text-[10px] hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                >
+                  {uploadMetaCopied.tags ? '복사됨 ✓' : '쉼표로 복사'}
+                </button>
+              </div>
+              <div className="mb-2 flex flex-wrap gap-1.5">
+                {uploadMeta.tags.list.map((tag, idx) => (
+                  <span
+                    key={`${tag}-${idx}`}
+                    className="inline-flex items-center gap-1 rounded-full border border-emerald-300 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950 px-2 py-0.5 text-[11px] text-emerald-800 dark:text-emerald-200"
+                  >
+                    {tag}
+                    <button
+                      onClick={() => uploadMetaRemoveTag(tag)}
+                      className="text-emerald-600 hover:text-emerald-800 dark:text-emerald-300 dark:hover:text-emerald-100"
+                      aria-label={`${tag} 제거`}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+              <div className="flex gap-1.5">
+                <input
+                  type="text"
+                  value={uploadMetaNewTag}
+                  onChange={(e) => setUploadMetaNewTag(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && uploadMetaAddTag()}
+                  placeholder="새 태그 입력 (Enter)"
+                  className="flex-1 rounded border border-zinc-300 dark:border-zinc-700 bg-transparent px-2 py-1 text-xs"
+                />
+                <button
+                  onClick={uploadMetaAddTag}
+                  className="rounded border border-zinc-300 dark:border-zinc-700 px-2 py-1 text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                >
+                  추가
+                </button>
+              </div>
+            </div>
+
+            {/* 해시태그 (선택) */}
+            {uploadMeta.hashtags && uploadMeta.hashtags.length > 0 && (
+              <div className="rounded border border-emerald-200 dark:border-emerald-900 p-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-xs font-medium">추천 해시태그</span>
+                  <button
+                    onClick={() =>
+                      copyUploadMetaField('hashtags', uploadMeta.hashtags!.join(' '))
+                    }
+                    className="rounded border border-zinc-300 dark:border-zinc-700 px-2 py-0.5 text-[10px] hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                  >
+                    {uploadMetaCopied.hashtags ? '복사됨 ✓' : '복사'}
+                  </button>
+                </div>
+                <p className="text-xs text-zinc-700 dark:text-zinc-300">
+                  {uploadMeta.hashtags.join(' ')}
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+
       {!showTTSSections && (
         <section className="mb-6 rounded-lg border border-dashed border-zinc-300 dark:border-zinc-700 p-4">
           <p className="text-xs text-zinc-600 dark:text-zinc-400">
@@ -1727,7 +2125,7 @@ export default function Home() {
             onClick={() => setForceShowTTS(true)}
             className="mt-2 rounded border border-zinc-300 dark:border-zinc-700 px-3 py-1 text-[11px] hover:bg-zinc-100 dark:hover:bg-zinc-800"
           >
-            그래도 8·9번 (TTS·MP4) 보기
+            그래도 9·10번 (TTS·MP4) 보기
           </button>
         </section>
       )}
@@ -1736,7 +2134,7 @@ export default function Home() {
       <>
       <section className="mb-6 rounded-lg border border-zinc-200 dark:border-zinc-800 p-4">
         <h2 className="mb-3 text-sm font-semibold">
-          8. 음성 합성 (TTS — 자동 합성용)
+          9. 음성 합성 (TTS — 자동 합성용)
           {jobId && (
             <span className="ml-2 text-xs font-normal text-zinc-500">job: {jobId}</span>
           )}
@@ -1745,7 +2143,7 @@ export default function Home() {
               onClick={() => setForceShowTTS(false)}
               className="ml-3 rounded border border-zinc-300 dark:border-zinc-700 px-2 py-0.5 text-[10px] font-normal hover:bg-zinc-100 dark:hover:bg-zinc-800"
             >
-              8·9번 숨기기
+              9·10번 숨기기
             </button>
           )}
         </h2>
@@ -1926,7 +2324,7 @@ export default function Home() {
 
       <section className="mb-6 rounded-lg border border-zinc-200 dark:border-zinc-800 p-4">
         <h2 className="mb-3 text-sm font-semibold">
-          9. MP4 합성 (TTS 경로 전용)
+          10. MP4 합성 (TTS 경로 전용)
           <span className="ml-2 text-xs font-normal text-zinc-500">
             슬라이드 PNG + 라인 오디오 → 1920×1080 MP4 (ffmpeg). 자막은 vrew에서 추가.
             직접 녹음(OBS) 흐름이면 이 단계는 건너뛰고 PowerPoint+OBS로 진행.
