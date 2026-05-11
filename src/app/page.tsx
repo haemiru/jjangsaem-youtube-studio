@@ -1423,7 +1423,7 @@ export default function Home() {
           )}
           {parsed.slideCount > 0 && (
             <span className="text-xs text-zinc-600 dark:text-zinc-400">
-              {parsed.slideCount}개 슬라이드 — 슬라이드당 약 60~90초 분량
+              {parsed.slideCount}개 슬라이드 — 분량은 슬라이드 내용에 따라 가변 (균등 X)
             </span>
           )}
         </div>
@@ -1458,7 +1458,7 @@ export default function Home() {
               value={lectureManualPaste}
               onChange={(e) => setLectureManualPaste(e.target.value)}
               rows={8}
-              placeholder={`## 슬라이드 1\n자, 어머님 아버님 안녕하세요...\n\n## 슬라이드 2\n...`}
+              placeholder={`## 슬라이드 1\n안녕하세요. 오늘은 ...\n\n## 슬라이드 2\n...`}
               className="mt-1 w-full rounded border border-orange-300 dark:border-orange-800 bg-white dark:bg-zinc-900 px-3 py-2 font-mono text-[11px] leading-5"
             />
             <button
