@@ -6,7 +6,10 @@ import { parseScript } from '@/lib/script-parser';
 import {
   buildLecturePrompt,
   buildLectureCritiquePrompt,
+  buildLectureSlideAuditPrompt,
   parseLectureScript,
+  stripLectureSlideHeader,
+  summarizeSlideScript,
 } from '@/lib/lecture-prompts';
 
 export const runtime = 'nodejs';
@@ -126,13 +129,65 @@ export async function POST(request: NextRequest) {
     for (let i = 0; i < parsed.slideCount; i++) {
       filled[i] = byIdx[i] ?? '';
     }
+
+    // 3차 — 슬라이드 단독 검증 패스 (vision 있을 때만).
+    // 각 슬라이드 이미지 1장 + 해당 대본 1개만 단독으로 보여주고 정합성 강제.
+    // 다른 슬라이드를 못 보니까 드리프트 발생 불가. 병렬 호출로 지연 최소화.
+    let audited: Record<number, string> = filled;
+    if (useVision) {
+      const slidesByIdx = new Map(slides.map((s) => [s.idx, s]));
+      const auditTasks: Promise<{ idx: number; text: string }>[] = [];
+
+      for (let i = 0; i < parsed.slideCount; i++) {
+        const draftText = filled[i];
+        const slideImg = slidesByIdx.get(i);
+        // 본문이 비었거나 이미지가 없으면 검증 건너뜀
+        if (!draftText.trim() || !slideImg) {
+          auditTasks.push(Promise.resolve({ idx: i, text: draftText }));
+          continue;
+        }
+        const prev = i > 0 ? summarizeSlideScript(filled[i - 1] ?? '') : undefined;
+        const next =
+          i < parsed.slideCount - 1
+            ? summarizeSlideScript(filled[i + 1] ?? '')
+            : undefined;
+        const { system, user } = buildLectureSlideAuditPrompt({
+          topic,
+          slideIdx: i,
+          slideCount: parsed.slideCount,
+          scriptText: draftText,
+          prevSummary: prev,
+          nextSummary: next,
+        });
+        auditTasks.push(
+          generateWithImages({
+            system,
+            user,
+            slides: [slideImg],
+            maxTokens: 2000,
+          })
+            .then((text) => ({
+              idx: i,
+              text: stripLectureSlideHeader(text),
+            }))
+            // 개별 슬라이드 audit 실패해도 전체 응답은 살린다 — 그 슬라이드만 2차 결과 유지
+            .catch(() => ({ idx: i, text: draftText }))
+        );
+      }
+
+      const auditResults = await Promise.all(auditTasks);
+      audited = {};
+      for (const r of auditResults) audited[r.idx] = r.text;
+    }
+
     return Response.json({
       slideCount: parsed.slideCount,
-      scripts: filled,
+      scripts: audited,
       usedVision: useVision,
       slideImagesLoaded: slides.length,
       draft,
       revised,
+      audited,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
