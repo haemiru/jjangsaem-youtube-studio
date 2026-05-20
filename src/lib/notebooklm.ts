@@ -68,9 +68,31 @@ async function runNlm(args: string[], opts: RunOptions = {}): Promise<string> {
         { stderr, stdout }
       );
     }
+    // nlm CLI returns JSON error on stdout (rc=1). Extract the actual reason.
+    let apiError: string | null = null;
+    if (stdout.trim().startsWith('{')) {
+      try {
+        const parsed = JSON.parse(stdout) as { status?: string; error?: string };
+        if (parsed.status === 'error' && typeof parsed.error === 'string') {
+          apiError = parsed.error;
+        }
+      } catch {
+        /* fall through */
+      }
+    }
+    const combined = `${stdout}\n${stderr}`;
+    if (combined.includes('Failed to create notebook')) {
+      throw new NotebookLMError(
+        'cli_error',
+        'NotebookLM 노트북 생성 실패 — 계정의 노트북 개수가 한도(100개)에 도달했을 가능성이 큽니다. notebooklm.google.com에서 안 쓰는 노트북(특히 "[자동]" 접두 노트북)을 정리하거나, 위 노트북 목록에서 기존 노트북을 선택해 재사용해 주세요.',
+        { stderr, stdout }
+      );
+    }
     throw new NotebookLMError(
       'cli_error',
-      `nlm 실행 실패: ${e.message || 'unknown'}`,
+      apiError
+        ? `NotebookLM 거절: ${apiError}`
+        : `nlm 실행 실패: ${e.message || 'unknown'}`,
       { stderr, stdout }
     );
   }
@@ -277,26 +299,30 @@ export async function waitForSlideDeckReady(
   const pollIntervalMs = options.pollIntervalMs ?? 5_000;
   const deadline = Date.now() + timeoutSec * 1000;
 
+  const OK = new Set(['ready', 'complete', 'completed', 'success']);
+  const FAIL = new Set(['failed', 'error']);
   let lastStatus = '';
   while (Date.now() < deadline) {
-    const arts = await listArtifacts(notebookId);
-    // 가장 최근 slide_deck artifact를 본다 (배열 끝)
-    const slideDecks = arts.filter((a) => a.type === 'slide_deck');
-    const latest = slideDecks[slideDecks.length - 1];
-    if (latest) {
-      lastStatus = latest.status;
-      const ok = ['ready', 'complete', 'completed', 'success'].includes(
-        latest.status.toLowerCase()
+    const slideDecks = (await listArtifacts(notebookId)).filter(
+      (a) => a.type === 'slide_deck'
+    );
+    // 여러 artifact가 있을 때(재시도로 failed가 남아있는 경우 등)
+    // ready > in_progress > failed 순으로 우선순위를 둔다.
+    const ready = slideDecks.find((a) => OK.has(a.status.toLowerCase()));
+    if (ready) return ready;
+    const pending = slideDecks.find(
+      (a) => !OK.has(a.status.toLowerCase()) && !FAIL.has(a.status.toLowerCase())
+    );
+    if (pending) {
+      lastStatus = pending.status;
+    } else if (slideDecks.length > 0) {
+      // 모두 failed인 경우에만 실패로 처리
+      const failed = slideDecks[0];
+      throw new NotebookLMError(
+        'cli_error',
+        `슬라이드 덱 생성 실패: status=${failed.status}`,
+        { stdout: JSON.stringify(failed.raw).slice(0, 500) }
       );
-      const failed = ['failed', 'error'].includes(latest.status.toLowerCase());
-      if (ok) return latest;
-      if (failed) {
-        throw new NotebookLMError(
-          'cli_error',
-          `슬라이드 덱 생성 실패: status=${latest.status}`,
-          { stdout: JSON.stringify(latest.raw).slice(0, 500) }
-        );
-      }
     }
     await new Promise((r) => setTimeout(r, pollIntervalMs));
   }

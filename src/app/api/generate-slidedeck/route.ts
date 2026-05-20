@@ -1,19 +1,25 @@
 import type { NextRequest } from 'next/server';
-import { mkdir, unlink } from 'node:fs/promises';
+import { mkdir, readdir, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import {
   createSlideDeck,
   downloadSlideDeck,
+  listArtifacts,
   waitForSlideDeckReady,
   NotebookLMError,
 } from '@/lib/notebooklm';
 import { convertPdfToPngs } from '@/lib/pdf-to-png';
 
 export const runtime = 'nodejs';
-export const maxDuration = 600; // 슬라이드 생성 + 다운로드 + 변환
+// 슬라이드 생성은 NotebookLM 측에서 10~15분까지도 걸린다.
+// + PDF 다운로드 + PNG 변환 여유 포함.
+export const maxDuration = 900;
 
 const SAFE_JOB_ID = /^[A-Za-z0-9_-]+$/;
 const SAFE_NOTEBOOK_ID = /^[0-9a-fA-F-]{20,}$/;
+// NotebookLM slide-deck focus(custom_instructions)는 너무 길면 생성이 조용히 실패한다.
+// 500자 정도가 안전한 상한선.
+const FOCUS_MAX_CHARS = 500;
 
 interface GenerateSlideDeckBody {
   notebookId: string;
@@ -23,6 +29,8 @@ interface GenerateSlideDeckBody {
   language?: string;
   // 'create' false면 다운로드만 (이전에 생성된 덱이 있을 때)
   create?: boolean;
+  // 'useExisting' true면 NotebookLM 호출 없이 디스크의 slide-*.png를 그대로 응답
+  useExisting?: boolean;
 }
 
 export async function POST(request: NextRequest) {
@@ -35,16 +43,24 @@ export async function POST(request: NextRequest) {
 
   const notebookId = (body.notebookId ?? '').trim();
   const jobId = (body.jobId ?? '').trim();
-  const focus = body.focus?.trim() || undefined;
+  const rawFocus = body.focus?.trim() || '';
+  const focusTruncated = rawFocus.length > FOCUS_MAX_CHARS;
+  const focus = rawFocus
+    ? focusTruncated
+      ? rawFocus.slice(0, FOCUS_MAX_CHARS)
+      : rawFocus
+    : undefined;
   const length = body.length;
   const language = body.language ?? 'ko';
   const create = body.create !== false;
+  const useExisting = body.useExisting === true;
 
-  if (!notebookId || !SAFE_NOTEBOOK_ID.test(notebookId)) {
-    return Response.json({ error: 'invalid notebookId' }, { status: 400 });
-  }
   if (!jobId || !SAFE_JOB_ID.test(jobId)) {
     return Response.json({ error: 'invalid jobId' }, { status: 400 });
+  }
+  // useExisting 모드에서는 notebookId 없어도 OK (디스크만 본다)
+  if (!useExisting && (!notebookId || !SAFE_NOTEBOOK_ID.test(notebookId))) {
+    return Response.json({ error: 'invalid notebookId' }, { status: 400 });
   }
 
   const slidesDir = path.join(process.cwd(), 'public', 'slides', jobId);
@@ -53,19 +69,54 @@ export async function POST(request: NextRequest) {
   try {
     await mkdir(slidesDir, { recursive: true });
 
-    if (create) {
-      // 1. NotebookLM 슬라이드 덱 생성 작업 시작 (CLI는 즉시 반환)
-      await createSlideDeck(notebookId, {
-        format: 'detailed_deck',
-        length,
-        language,
-        focus,
-        timeoutSec: 60,
+    if (useExisting) {
+      const entries = await readdir(slidesDir).catch(() => [] as string[]);
+      const pngs = entries
+        .filter((f) => /^slide-\d+\.png$/i.test(f))
+        .sort();
+      if (pngs.length === 0) {
+        return Response.json(
+          { error: 'no_existing_slides', message: `${slidesDir} 에 slide-*.png 가 없습니다.` },
+          { status: 404 }
+        );
+      }
+      const slides = pngs.map((f, i) => ({
+        index: i,
+        url: `/slides/${jobId}/${f}`,
+      }));
+      return Response.json({
+        jobId,
+        notebookId: notebookId || null,
+        pageCount: slides.length,
+        slides,
+        reused: true,
       });
     }
 
+    if (create) {
+      // 이미 in_progress 슬라이드 덱이 있으면 새로 만들지 않고 그걸 기다린다.
+      const existing = await listArtifacts(notebookId).catch(() => []);
+      const hasPending = existing.some(
+        (a) =>
+          a.type === 'slide_deck' &&
+          !['ready', 'complete', 'completed', 'success', 'failed', 'error'].includes(
+            a.status.toLowerCase()
+          )
+      );
+      if (!hasPending) {
+        // 1. NotebookLM 슬라이드 덱 생성 작업 시작 (CLI는 즉시 반환)
+        await createSlideDeck(notebookId, {
+          format: 'detailed_deck',
+          length,
+          language,
+          focus,
+          timeoutSec: 60,
+        });
+      }
+    }
+
     // 2. 슬라이드 덱 artifact가 ready 상태가 될 때까지 폴링
-    await waitForSlideDeckReady(notebookId, { timeoutSec: 480, pollIntervalMs: 5000 });
+    await waitForSlideDeckReady(notebookId, { timeoutSec: 780, pollIntervalMs: 5000 });
 
     // 3. PDF로 다운로드
     await downloadSlideDeck(notebookId, pdfPath, { format: 'pdf', timeoutSec: 180 });
@@ -96,6 +147,9 @@ export async function POST(request: NextRequest) {
       notebookId,
       pageCount: result.pageCount,
       slides,
+      focusTruncated: focusTruncated
+        ? { originalLength: rawFocus.length, truncatedTo: FOCUS_MAX_CHARS }
+        : null,
     });
   } catch (err) {
     if (err instanceof NotebookLMError) {
