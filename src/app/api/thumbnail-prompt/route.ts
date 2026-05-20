@@ -1,6 +1,6 @@
 import type { NextRequest } from 'next/server';
 import { generate } from '@/lib/anthropic';
-import { buildThumbnailPrompt } from '@/lib/thumbnail-prompts';
+import { buildThumbnailPrompt, parseThumbnailResult } from '@/lib/thumbnail-prompts';
 
 export const runtime = 'nodejs';
 export const maxDuration = 120;
@@ -53,8 +53,20 @@ export async function POST(request: NextRequest) {
   });
 
   try {
-    const prompt = await generate({ system, user, maxTokens: 2000 });
-    return Response.json({ prompt: prompt.trim() });
+    // 5개 이미지 프롬프트(~500자) + 5개 헤드라인 → 넉넉히 6000 토큰
+    const raw = await generate({ system, user, maxTokens: 6000 });
+    const result = parseThumbnailResult(raw);
+    if (
+      result.visuals.length === 0 &&
+      result.infographics.length === 0 &&
+      result.headlines.length === 0
+    ) {
+      return Response.json(
+        { error: 'parse_failed', message: '응답을 JSON으로 파싱하지 못했습니다.', raw },
+        { status: 500 }
+      );
+    }
+    return Response.json({ ...result, raw });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return Response.json({ error: 'generate_failed', message }, { status: 500 });
