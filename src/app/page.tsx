@@ -24,6 +24,7 @@ type TTSProvider = 'supertone' | 'gemini';
 const LS_GEMINI_KEY = 'jjangsaem.gemini.apiKey';
 const LS_GEMINI_VOICES = 'jjangsaem.gemini.voices';
 const LS_TTS_PROVIDER = 'jjangsaem.tts.provider';
+const LS_STUDIO_STATE = 'jjangsaem.studio.v1';
 
 interface NotebookOption {
   id: string;
@@ -93,6 +94,8 @@ export default function Home() {
   const [validateOn, setValidateOn] = useState(false);
   const [scriptUseApi, setScriptUseApi] = useState(true);
   const [scriptPrompt, setScriptPrompt] = useState<{ system: string; user: string } | null>(null);
+  const [scriptPromptBuilding, setScriptPromptBuilding] = useState(false);
+  const [scriptPromptBuildError, setScriptPromptBuildError] = useState('');
   const [scriptCopied, setScriptCopied] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [audioByLine, setAudioByLine] = useState<Record<number, LineAudio>>({});
@@ -128,8 +131,19 @@ export default function Home() {
   const [thumbnailUseApi, setThumbnailUseApi] = useState(true);
   const [thumbnailGenerating, setThumbnailGenerating] = useState(false);
   const [thumbnailError, setThumbnailError] = useState('');
-  const [thumbnailResult, setThumbnailResult] = useState(''); // Flow에 붙여넣을 최종 한국어 프롬프트
-  const [thumbnailResultCopied, setThumbnailResultCopied] = useState(false);
+  // 비주얼-온리 이미지 프롬프트 2장
+  const [thumbnailVisuals, setThumbnailVisuals] = useState<
+    { concept: string; prompt: string }[]
+  >([]);
+  // 대본 전체 내용을 아우르는 인포그래픽 이미지 프롬프트 2장
+  const [thumbnailInfographics, setThumbnailInfographics] = useState<
+    { concept: string; prompt: string }[]
+  >([]);
+  // 헤드라인 카피 5개 후보
+  const [thumbnailHeadlines, setThumbnailHeadlines] = useState<string[]>([]);
+  const [thumbnailVisualCopiedIdx, setThumbnailVisualCopiedIdx] = useState<number | null>(null);
+  const [thumbnailInfographicCopiedIdx, setThumbnailInfographicCopiedIdx] = useState<number | null>(null);
+  const [thumbnailHeadlineCopiedIdx, setThumbnailHeadlineCopiedIdx] = useState<number | null>(null);
   const [thumbnailManualPrompt, setThumbnailManualPrompt] = useState<{
     system: string;
     user: string;
@@ -256,6 +270,127 @@ export default function Home() {
     );
   }, [geminiVoiceJjangsaem, geminiVoiceMom, geminiVoiceDad, tssHydrated]);
 
+  // 스튜디오 상태 영속화 (새로고침 시 진행 상태 살리기)
+  const [studioHydrated, setStudioHydrated] = useState(false);
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(LS_STUDIO_STATE);
+      if (raw) {
+        const s = JSON.parse(raw) as Record<string, unknown>;
+        if (typeof s.topic === 'string') setTopic(s.topic);
+        if (s.mode === 'dialogue' || s.mode === 'solo') setMode(s.mode);
+        if (s.parentGender === 'mom' || s.parentGender === 'dad')
+          setParentGender(s.parentGender);
+        if (typeof s.targetMinutes === 'number') setTargetMinutes(s.targetMinutes);
+        if (typeof s.script === 'string') setScript(s.script);
+        if (typeof s.notebookId === 'string') setNotebookId(s.notebookId);
+        if (typeof s.research === 'string') setResearch(s.research);
+        if (typeof s.jobId === 'string') setJobId(s.jobId);
+        if (s.lectureScripts && typeof s.lectureScripts === 'object')
+          setLectureScripts(s.lectureScripts as Record<number, string>);
+        if (s.slideImages && typeof s.slideImages === 'object')
+          setSlideImages(s.slideImages as Record<number, string>);
+        if (
+          s.slidedeckInfo &&
+          typeof s.slidedeckInfo === 'object' &&
+          typeof (s.slidedeckInfo as { pageCount?: unknown }).pageCount === 'number'
+        )
+          setSlidedeckInfo(s.slidedeckInfo as { pageCount: number; notebookId: string });
+        if (Array.isArray(s.thumbnailVisuals))
+          setThumbnailVisuals(s.thumbnailVisuals as { concept: string; prompt: string }[]);
+        if (Array.isArray(s.thumbnailInfographics))
+          setThumbnailInfographics(
+            s.thumbnailInfographics as { concept: string; prompt: string }[]
+          );
+        if (Array.isArray(s.thumbnailHeadlines))
+          setThumbnailHeadlines(s.thumbnailHeadlines as string[]);
+        if (s.uploadMeta && typeof s.uploadMeta === 'object')
+          setUploadMeta(s.uploadMeta as UploadMetaJson);
+        if (s.autoNotebook && typeof s.autoNotebook === 'object')
+          setAutoNotebook(
+            s.autoNotebook as { id: string; title: string; via: 'pdf' | 'research' }
+          );
+        if (s.imagePromptByIdx && typeof s.imagePromptByIdx === 'object')
+          setImagePromptByIdx(s.imagePromptByIdx as Record<number, string>);
+      }
+    } catch {
+      // ignore (corrupt JSON 등)
+    }
+    setStudioHydrated(true);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!studioHydrated) return;
+    try {
+      window.localStorage.setItem(
+        LS_STUDIO_STATE,
+        JSON.stringify({
+          topic,
+          mode,
+          parentGender,
+          targetMinutes,
+          script,
+          notebookId,
+          research,
+          jobId,
+          lectureScripts,
+          slideImages,
+          slidedeckInfo,
+          thumbnailVisuals,
+          thumbnailInfographics,
+          thumbnailHeadlines,
+          uploadMeta,
+          autoNotebook,
+          imagePromptByIdx,
+        })
+      );
+    } catch {
+      // QuotaExceeded 등 — 무시 (다음 변경에 다시 시도)
+    }
+  }, [
+    studioHydrated,
+    topic,
+    mode,
+    parentGender,
+    targetMinutes,
+    script,
+    notebookId,
+    research,
+    jobId,
+    lectureScripts,
+    slideImages,
+    slidedeckInfo,
+    thumbnailVisuals,
+    thumbnailInfographics,
+    thumbnailHeadlines,
+    uploadMeta,
+    autoNotebook,
+    imagePromptByIdx,
+  ]);
+
+  function clearStudioState() {
+    try {
+      window.localStorage.removeItem(LS_STUDIO_STATE);
+    } catch {
+      // ignore
+    }
+    setTopic('');
+    setScript('');
+    setResearch('');
+    setNotebookId('');
+    setJobId(null);
+    setLectureScripts({});
+    setSlideImages({});
+    setSlidedeckInfo(null);
+    setThumbnailVisuals([]);
+    setThumbnailInfographics([]);
+    setThumbnailHeadlines([]);
+    setUploadMeta(null);
+    setAutoNotebook(null);
+    setImagePromptByIdx({});
+  }
+
   const parsed = useMemo(() => parseScript(script, mode), [script, mode]);
   const validation = useMemo(() => validateScript(parsed, mode), [parsed, mode]);
 
@@ -302,14 +437,41 @@ export default function Home() {
           mode,
           notebookId: notebookId || undefined,
           targetMinutes,
-          pdfText: !notebookId && pdfExtract?.text ? pdfExtract.text : undefined,
+          pdfChunks:
+            !notebookId && pdfExtract?.chunks && pdfExtract.chunks.length > 0
+              ? pdfExtract.chunks.map((c) => ({ title: c.title, text: c.text }))
+              : undefined,
+          pdfText:
+            !notebookId &&
+            pdfExtract?.text &&
+            (!pdfExtract.chunks || pdfExtract.chunks.length === 0)
+              ? pdfExtract.text
+              : undefined,
           pdfFileName: !notebookId && pdfFileName ? pdfFileName : undefined,
         }),
       });
       const data = await res.json();
       if (!res.ok) {
-        setResearchError(data?.message || data?.error || `HTTP ${res.status}`);
+        const parts = [data?.message || data?.error || `HTTP ${res.status}`];
+        if (data?.topicTruncated) {
+          const t = data.topicTruncated as { originalLength: number; truncatedTo: number };
+          parts.push(
+            `(주제가 ${t.originalLength.toLocaleString()}자 → 앞 ${t.truncatedTo.toLocaleString()}자로 잘려 보내졌지만 그래도 실패했습니다. 주제를 더 짧게 다듬어 주세요.)`
+          );
+        }
+        if (typeof data?.stderr === 'string' && data.stderr.trim()) {
+          parts.push(`stderr: ${data.stderr.trim().slice(0, 400)}`);
+        } else if (typeof data?.stdout === 'string' && data.stdout.trim()) {
+          parts.push(`stdout: ${data.stdout.trim().slice(0, 400)}`);
+        }
+        setResearchError(parts.join('\n'));
         return;
+      }
+      if (data.topicTruncated) {
+        const t = data.topicTruncated as { originalLength: number; truncatedTo: number };
+        setResearchError(
+          `주제가 너무 길어 앞 ${t.truncatedTo.toLocaleString()}자만 사용했습니다 (입력 ${t.originalLength.toLocaleString()}자). 더 정확한 결과를 원하시면 주제를 짧게 다듬어 주세요.`
+        );
       }
       setResearch(String(data.findings ?? ''));
       if (data.createdNotebook) {
@@ -358,18 +520,52 @@ export default function Home() {
     setPdfError(null);
   }
 
-  function buildScriptPromptForManual() {
+  async function buildScriptPromptForManual() {
     if (!topic.trim()) return;
-    const { system, user } = buildScriptPrompt({
-      topic: topic.trim(),
-      mode,
-      parentGender: mode === 'dialogue' ? parentGender : undefined,
-      targetMinutes,
-      pdfText: pdfExtract?.text,
-      research: research.trim() || undefined,
-    });
-    setScriptPrompt({ system, user });
-    setScriptCopied(false);
+    setScriptPromptBuildError('');
+    setScriptPromptBuilding(true);
+    try {
+      // API 모드와 동일하게: PDF가 있으면 주제 관련 발췌를 먼저 받아서 그것을 reference로.
+      let pdfForPrompt: string | undefined = pdfExtract?.text || undefined;
+      if (pdfForPrompt) {
+        try {
+          const res = await fetch('/api/pdf-excerpt', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              topic: topic.trim(),
+              pdfText: pdfForPrompt,
+              maxChars: 3_000,
+            }),
+          });
+          const data = await res.json();
+          if (res.ok && typeof data.excerpt === 'string' && data.excerpt.trim()) {
+            pdfForPrompt = data.excerpt.trim();
+          } else if (!res.ok) {
+            setScriptPromptBuildError(
+              `PDF 발췌 실패 — 원본 PDF 그대로 프롬프트에 포함됩니다. (${data?.message || data?.error || res.status})`
+            );
+          }
+        } catch (err) {
+          setScriptPromptBuildError(
+            `PDF 발췌 호출 실패 — 원본 PDF 그대로 포함됩니다. (${err instanceof Error ? err.message : String(err)})`
+          );
+        }
+      }
+
+      const { system, user } = buildScriptPrompt({
+        topic: topic.trim(),
+        mode,
+        parentGender: mode === 'dialogue' ? parentGender : undefined,
+        targetMinutes,
+        pdfText: pdfForPrompt,
+        research: research.trim() || undefined,
+      });
+      setScriptPrompt({ system, user });
+      setScriptCopied(false);
+    } finally {
+      setScriptPromptBuilding(false);
+    }
   }
 
   function ensureJobId(): string {
@@ -377,6 +573,43 @@ export default function Home() {
     const id = newJobId();
     setJobId(id);
     return id;
+  }
+
+  // 디스크에 이미 들어있는 slide-*.png 그대로 가져오기 (이전 라우트 실행이 타임아웃됐을 때 등)
+  async function handleLoadExistingSlideDeck() {
+    if (!jobId) {
+      setSlidedeckError('jobId가 없습니다. 먼저 슬라이드 덱 자동 생성을 한 번이라도 실행한 적이 있어야 합니다.');
+      return;
+    }
+    setSlidedeckError(null);
+    setSlidedeckLoading(true);
+    try {
+      const res = await fetch('/api/generate-slidedeck', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jobId,
+          notebookId: notebookId || undefined,
+          useExisting: true,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setSlidedeckError(data?.message || data?.error || `HTTP ${res.status}`);
+        return;
+      }
+      const next: Record<number, string> = {};
+      const arr = data.slides as { index: number; url: string }[];
+      arr.forEach((s) => {
+        next[s.index] = s.url;
+      });
+      setSlideImages(next);
+      setSlidedeckInfo({ pageCount: data.pageCount, notebookId: data.notebookId ?? '' });
+    } catch (err) {
+      setSlidedeckError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSlidedeckLoading(false);
+    }
   }
 
   // Phase B — NotebookLM 슬라이드 덱 자동 생성
@@ -616,8 +849,12 @@ export default function Home() {
     if (!topic.trim()) return;
     setThumbnailGenerating(true);
     setThumbnailError('');
-    setThumbnailResult('');
-    setThumbnailResultCopied(false);
+    setThumbnailVisuals([]);
+    setThumbnailInfographics([]);
+    setThumbnailHeadlines([]);
+    setThumbnailVisualCopiedIdx(null);
+    setThumbnailInfographicCopiedIdx(null);
+    setThumbnailHeadlineCopiedIdx(null);
     try {
       const res = await fetch('/api/thumbnail-prompt', {
         method: 'POST',
@@ -632,7 +869,28 @@ export default function Home() {
       if (!res.ok) {
         throw new Error(data?.message || data?.error || `HTTP ${res.status}`);
       }
-      setThumbnailResult(typeof data.prompt === 'string' ? data.prompt.trim() : '');
+      const pickItems = (arr: unknown) =>
+        Array.isArray(arr)
+          ? (arr as { concept?: unknown; prompt?: unknown }[])
+              .map((p) => ({
+                concept: typeof p.concept === 'string' ? p.concept : '(라벨 없음)',
+                prompt: typeof p.prompt === 'string' ? p.prompt.trim() : '',
+              }))
+              .filter((p) => p.prompt.length > 0)
+          : [];
+      const visuals = pickItems(data.visuals);
+      const infographics = pickItems(data.infographics);
+      const headlines = Array.isArray(data.headlines)
+        ? (data.headlines as unknown[])
+            .filter((h): h is string => typeof h === 'string' && h.trim().length > 0)
+            .map((h) => h.trim())
+        : [];
+      if (visuals.length === 0 && infographics.length === 0 && headlines.length === 0) {
+        throw new Error('응답에서 이미지 프롬프트나 헤드라인을 파싱하지 못했습니다.');
+      }
+      setThumbnailVisuals(visuals);
+      setThumbnailInfographics(infographics);
+      setThumbnailHeadlines(headlines);
     } catch (err) {
       setThumbnailError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -784,7 +1042,18 @@ export default function Home() {
 
   function combinedPromptText(p: { system: string; user: string } | null): string {
     if (!p) return '';
-    return `[System]\n${p.system}\n\n[User]\n${p.user}`;
+    // Claude.ai 웹에는 system 슬롯이 없어 user 메시지로 결합된다.
+    // 시스템 우선순위를 살리기 위해 앞머리에 강한 priming을 둔다.
+    const PRIMING = [
+      '아래는 시스템 지시(System Instruction)와 작업 입력(User Input)입니다.',
+      '시스템 지시는 절대 무시·축약·재해석하지 말고 그대로 적용하세요.',
+      '응답에 머리말·꼬리말·요약·설명·"네, 알겠습니다" 같은 친절 멘트를 절대 포함하지 마세요.',
+      '시스템 지시에서 지정한 출력 형식(마크다운/JSON 등) 외에는 어떤 텍스트도 출력 금지.',
+      '',
+      '권장 사용 환경: Claude.ai 웹에서 Opus 모델 선택. 모델·환경이 다르면 결과가 API 모드와 달라질 수 있습니다.',
+      '',
+    ].join('\n');
+    return `${PRIMING}===== [System Instruction] =====\n${p.system}\n\n===== [User Input] =====\n${p.user}`;
   }
 
   async function copyToClipboard(text: string, onDone: () => void) {
@@ -914,19 +1183,38 @@ export default function Home() {
 
   return (
     <main className="mx-auto max-w-5xl px-6 py-10 font-sans text-zinc-900 dark:text-zinc-100">
-      <header className="mb-8">
-        <h1
+      <header className="mb-8 flex items-start justify-between gap-4">
+        <div>
+          <h1
+            onClick={() => {
+              if (typeof window !== 'undefined') window.location.reload();
+            }}
+            title="클릭하면 새로고침"
+            className="cursor-pointer text-2xl font-bold tracking-tight hover:opacity-70"
+          >
+            짱샘 유튜브 스튜디오
+          </h1>
+          <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+            영상 주제 → 리서치 → 대본 → 슬라이드 → 음성 → MP4 자동 생성
+            <span className="ml-2 text-xs opacity-70">· 진행 상태는 브라우저에 자동 저장됨</span>
+          </p>
+        </div>
+        <button
+          type="button"
           onClick={() => {
-            if (typeof window !== 'undefined') window.location.reload();
+            if (
+              window.confirm(
+                '저장된 주제·대본·리서치·슬라이드·메타데이터를 모두 지우고 새로 시작합니다. 계속할까요?'
+              )
+            ) {
+              clearStudioState();
+            }
           }}
-          title="클릭하면 새로고침"
-          className="cursor-pointer text-2xl font-bold tracking-tight hover:opacity-70"
+          className="shrink-0 rounded border border-zinc-300 dark:border-zinc-700 px-3 py-1.5 text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800"
+          title="저장된 작업 상태를 모두 지우고 처음부터 시작"
         >
-          짱샘 유튜브 스튜디오
-        </h1>
-        <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-          영상 주제 → 리서치 → 대본 → 슬라이드 → 음성 → MP4 자동 생성
-        </p>
+          전체 초기화
+        </button>
       </header>
 
       <section className="mb-6 rounded-lg border border-zinc-200 dark:border-zinc-800 p-4">
@@ -1022,6 +1310,7 @@ export default function Home() {
             <p className="mt-2 text-xs text-green-700 dark:text-green-400">
               ✓ {pdfFileName} — {pdfExtract.extractedPages}/{pdfExtract.totalPages}페이지,{' '}
               {pdfExtract.text.length.toLocaleString()}자 추출
+              {pdfExtract.chunks.length > 0 && ` · ${pdfExtract.chunks.length}개 청크`}
               {pdfExtract.truncated && ' (잘림)'}
             </p>
           )}
@@ -1123,7 +1412,7 @@ export default function Home() {
         )}
 
         {researchError && (
-          <div className="mt-3 rounded bg-red-50 dark:bg-red-950 p-3 text-xs text-red-800 dark:text-red-200">
+          <div className="mt-3 rounded bg-red-50 dark:bg-red-950 p-3 text-xs text-red-800 dark:text-red-200 whitespace-pre-wrap">
             {researchError}
           </div>
         )}
@@ -1213,11 +1502,18 @@ export default function Home() {
           ) : (
             <button
               onClick={buildScriptPromptForManual}
-              disabled={!topic.trim() || extractingPdf}
+              disabled={!topic.trim() || extractingPdf || scriptPromptBuilding}
               className="rounded bg-violet-600 px-4 py-2 text-sm text-white hover:bg-violet-500 disabled:bg-zinc-400 disabled:cursor-not-allowed"
             >
-              프롬프트 생성
+              {scriptPromptBuilding
+                ? (pdfExtract ? 'PDF 발췌 + 프롬프트 빌드 중...' : '프롬프트 빌드 중...')
+                : '프롬프트 생성'}
             </button>
+          )}
+          {scriptPromptBuildError && (
+            <span className="text-xs text-amber-700 dark:text-amber-300">
+              {scriptPromptBuildError}
+            </span>
           )}
           <span className="text-xs text-zinc-500">
             {research.trim() && `리서치 ${research.trim().length.toLocaleString()}자`}
@@ -1371,8 +1667,16 @@ export default function Home() {
             className="rounded bg-fuchsia-600 px-4 py-2 text-sm text-white hover:bg-fuchsia-500 disabled:bg-zinc-400 disabled:cursor-not-allowed"
           >
             {slidedeckLoading
-              ? 'NotebookLM 슬라이드 덱 생성 + PNG 변환 중... (3~7분)'
+              ? 'NotebookLM 슬라이드 덱 생성 + PNG 변환 중... (5~15분)'
               : '슬라이드 덱 자동 생성 (NotebookLM)'}
+          </button>
+          <button
+            onClick={handleLoadExistingSlideDeck}
+            disabled={!jobId || slidedeckLoading}
+            title="이전에 생성됐지만 라우트가 타임아웃돼 화면엔 안 들어온 슬라이드를 디스크에서 그대로 불러옵니다."
+            className="rounded border border-fuchsia-400 px-3 py-2 text-xs text-fuchsia-700 hover:bg-fuchsia-50 dark:text-fuchsia-300 dark:hover:bg-fuchsia-950 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            이미 만든 덱 불러오기
           </button>
           {!notebookId && (
             <span className="text-xs text-amber-700 dark:text-amber-300">
@@ -1818,30 +2122,149 @@ export default function Home() {
           </div>
         )}
 
-        {thumbnailResult && (
-          <div className="rounded border border-fuchsia-300 dark:border-fuchsia-800 bg-fuchsia-50 dark:bg-fuchsia-950 p-3">
-            <div className="mb-2 flex items-center justify-between">
-              <span className="text-xs font-medium text-fuchsia-900 dark:text-fuchsia-100">
-                Google Flow에 그대로 붙여넣으세요
-              </span>
-              <button
-                onClick={() =>
-                  copyToClipboard(thumbnailResult, () => setThumbnailResultCopied(true))
-                }
-                className="rounded bg-fuchsia-600 px-3 py-1 text-xs text-white hover:bg-fuchsia-500"
-              >
-                {thumbnailResultCopied ? '복사됨 ✓' : 'Flow 프롬프트 복사'}
-              </button>
-            </div>
-            <textarea
-              value={thumbnailResult}
-              onChange={(e) => setThumbnailResult(e.target.value)}
-              rows={10}
-              className="w-full rounded border border-fuchsia-300 dark:border-fuchsia-800 bg-white dark:bg-zinc-900 px-3 py-2 text-xs leading-6"
-            />
-            <p className="mt-1 text-[10px] text-fuchsia-700 dark:text-fuchsia-300">
-              필요하면 직접 편집한 뒤 Flow에 붙여넣으세요. 한글 헤드라인 카피는 Flow가 잘 렌더링합니다.
-            </p>
+        {(thumbnailVisuals.length > 0 ||
+          thumbnailInfographics.length > 0 ||
+          thumbnailHeadlines.length > 0) && (
+          <div className="space-y-4">
+            {thumbnailVisuals.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs font-medium text-fuchsia-900 dark:text-fuchsia-100">
+                  비주얼 이미지 (텍스트 합성 없음) — {thumbnailVisuals.length}장
+                </p>
+                <p className="text-[11px] text-fuchsia-700 dark:text-fuchsia-300">
+                  Flow에 붙여넣어 텍스트 없는 이미지를 생성하세요. 그 위에 아래 헤드라인 후보 중
+                  하나를 별도로 합성하면 됩니다.
+                </p>
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  {thumbnailVisuals.map((item, i) => (
+                    <div
+                      key={i}
+                      className="rounded border border-fuchsia-300 dark:border-fuchsia-800 bg-fuchsia-50 dark:bg-fuchsia-950 p-3"
+                    >
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <span className="text-xs font-medium text-fuchsia-900 dark:text-fuchsia-100">
+                          <span className="mr-1 inline-block rounded bg-fuchsia-600 px-1.5 py-0.5 text-[10px] text-white">
+                            V{i + 1}
+                          </span>
+                          {item.concept}
+                        </span>
+                        <button
+                          onClick={() =>
+                            copyToClipboard(item.prompt, () =>
+                              setThumbnailVisualCopiedIdx(i)
+                            )
+                          }
+                          className="rounded bg-fuchsia-600 px-3 py-1 text-xs text-white hover:bg-fuchsia-500"
+                        >
+                          {thumbnailVisualCopiedIdx === i ? '복사됨 ✓' : '복사'}
+                        </button>
+                      </div>
+                      <textarea
+                        value={item.prompt}
+                        onChange={(e) => {
+                          const next = [...thumbnailVisuals];
+                          next[i] = { ...next[i], prompt: e.target.value };
+                          setThumbnailVisuals(next);
+                        }}
+                        rows={9}
+                        className="w-full rounded border border-fuchsia-300 dark:border-fuchsia-800 bg-white dark:bg-zinc-900 px-3 py-2 text-xs leading-6"
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {thumbnailInfographics.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs font-medium text-emerald-900 dark:text-emerald-100">
+                  인포그래픽 이미지 (대본 전체 내용 — 텍스트 포함) — {thumbnailInfographics.length}장
+                </p>
+                <p className="text-[11px] text-emerald-700 dark:text-emerald-300">
+                  영상 본편의 핵심을 한 장으로 보여주는 인포그래픽. 한글 텍스트가 이미지 안에
+                  합성됩니다. 별도 헤드라인 합성 없이도 자체로 완결.
+                </p>
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  {thumbnailInfographics.map((item, i) => (
+                    <div
+                      key={i}
+                      className="rounded border border-emerald-300 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950 p-3"
+                    >
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <span className="text-xs font-medium text-emerald-900 dark:text-emerald-100">
+                          <span className="mr-1 inline-block rounded bg-emerald-600 px-1.5 py-0.5 text-[10px] text-white">
+                            I{i + 1}
+                          </span>
+                          {item.concept}
+                        </span>
+                        <button
+                          onClick={() =>
+                            copyToClipboard(item.prompt, () =>
+                              setThumbnailInfographicCopiedIdx(i)
+                            )
+                          }
+                          className="rounded bg-emerald-600 px-3 py-1 text-xs text-white hover:bg-emerald-500"
+                        >
+                          {thumbnailInfographicCopiedIdx === i ? '복사됨 ✓' : '복사'}
+                        </button>
+                      </div>
+                      <textarea
+                        value={item.prompt}
+                        onChange={(e) => {
+                          const next = [...thumbnailInfographics];
+                          next[i] = { ...next[i], prompt: e.target.value };
+                          setThumbnailInfographics(next);
+                        }}
+                        rows={10}
+                        className="w-full rounded border border-emerald-300 dark:border-emerald-800 bg-white dark:bg-zinc-900 px-3 py-2 text-xs leading-6"
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {thumbnailHeadlines.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs font-medium text-amber-900 dark:text-amber-100">
+                  헤드라인 카피 후보 — {thumbnailHeadlines.length}개
+                </p>
+                <p className="text-[11px] text-amber-700 dark:text-amber-300">
+                  생성한 비주얼 이미지 위에 별도로 합성할 한글 헤드라인. 2줄 구성(윗줄 꾸밈 + 아랫줄 핵심).
+                  마음에 드는 카피를 복사해 쓰세요.
+                </p>
+                <ul className="space-y-2">
+                  {thumbnailHeadlines.map((h, i) => (
+                    <li
+                      key={i}
+                      className="flex items-start gap-2 rounded border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950 p-2"
+                    >
+                      <span className="mt-1 inline-block w-5 shrink-0 rounded bg-amber-600 px-1.5 py-0.5 text-center text-[10px] text-white">
+                        {i + 1}
+                      </span>
+                      <textarea
+                        value={h}
+                        onChange={(e) => {
+                          const next = [...thumbnailHeadlines];
+                          next[i] = e.target.value;
+                          setThumbnailHeadlines(next);
+                        }}
+                        rows={2}
+                        className="flex-1 resize-y rounded border border-amber-300 dark:border-amber-800 bg-white dark:bg-zinc-900 px-2 py-1 text-sm font-semibold leading-6"
+                      />
+                      <button
+                        onClick={() =>
+                          copyToClipboard(h, () => setThumbnailHeadlineCopiedIdx(i))
+                        }
+                        className="mt-1 shrink-0 rounded bg-amber-600 px-3 py-1 text-xs text-white hover:bg-amber-500"
+                      >
+                        {thumbnailHeadlineCopiedIdx === i ? '복사됨 ✓' : '복사'}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
         )}
       </section>
