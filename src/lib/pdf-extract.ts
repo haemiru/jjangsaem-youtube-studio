@@ -1,10 +1,19 @@
 const MAX_PAGES = 50;
 const MAX_CHARS = 20_000;
+const CHUNK_TARGET_CHARS = 3_000;
 
 let workerInitialized = false;
 
+export interface PdfChunk {
+  title: string;
+  text: string;
+  pageStart: number;
+  pageEnd: number;
+}
+
 export interface PdfExtractResult {
   text: string;
+  chunks: PdfChunk[];
   totalPages: number;
   extractedPages: number;
   truncated: boolean;
@@ -31,12 +40,18 @@ export async function extractPdfText(file: File): Promise<PdfExtractResult> {
   const extractedPages = Math.min(totalPages, MAX_PAGES);
 
   let fullText = '';
+  const pageTexts: string[] = [];
+
   for (let i = 1; i <= extractedPages; i++) {
     const page = await pdf.getPage(i);
     const content = await page.getTextContent();
+    // 한국어 PDF는 글자가 1글자씩 별도 텍스트 item으로 분리돼 나오는 경우가 많아,
+    // 구분자 ' '로 join하면 모든 글자 사이에 공백이 박혀 의미를 알아볼 수 없게 된다.
+    // 실제 공백은 별도 item(str=' ')으로 들어오므로 빈 문자열로 이어붙이면 보존된다.
     const pageText = content.items
       .map((item) => ('str' in item ? item.str : ''))
-      .join(' ');
+      .join('');
+    pageTexts.push(pageText);
     fullText += pageText + '\n';
     if (fullText.length >= MAX_CHARS) break;
   }
@@ -44,5 +59,37 @@ export async function extractPdfText(file: File): Promise<PdfExtractResult> {
   const truncated = fullText.length > MAX_CHARS || totalPages > MAX_PAGES;
   const text = fullText.slice(0, MAX_CHARS).trim();
 
-  return { text, totalPages, extractedPages, truncated };
+  // 페이지 단위로 누적해서 ~CHUNK_TARGET_CHARS 단위로 청크 구성.
+  // NotebookLM 슬라이드 엔진은 단일 거대 소스보다 여러 작은 소스에서 더 안정적이다.
+  const chunks: PdfChunk[] = [];
+  let cur = '';
+  let curStart = 1;
+  let consumed = 0;
+  for (let idx = 0; idx < pageTexts.length; idx++) {
+    const pageIdx = idx + 1;
+    let pageText = pageTexts[idx];
+    // 전체 텍스트가 MAX_CHARS에서 잘리는 경계 페이지 처리
+    if (consumed + pageText.length > MAX_CHARS) {
+      pageText = pageText.slice(0, Math.max(0, MAX_CHARS - consumed));
+    }
+    consumed += pageText.length;
+    if (!cur) curStart = pageIdx;
+    cur += (cur ? '\n' : '') + pageText;
+    const isLast = idx === pageTexts.length - 1 || consumed >= MAX_CHARS;
+    if (cur.length >= CHUNK_TARGET_CHARS || isLast) {
+      const trimmed = cur.trim();
+      if (trimmed) {
+        chunks.push({
+          title: `p.${curStart}-${pageIdx}`,
+          text: trimmed,
+          pageStart: curStart,
+          pageEnd: pageIdx,
+        });
+      }
+      cur = '';
+    }
+    if (consumed >= MAX_CHARS) break;
+  }
+
+  return { text, chunks, totalPages, extractedPages, truncated };
 }

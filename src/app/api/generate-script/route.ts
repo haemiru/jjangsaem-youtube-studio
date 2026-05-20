@@ -1,9 +1,11 @@
 import type { NextRequest } from 'next/server';
 import { generate } from '@/lib/anthropic';
 import { buildPrompt, type ScriptMode, type ParentGender } from '@/lib/script-prompts';
+import { summarizeForTopic } from '@/lib/pdf-summarize';
 
 export const runtime = 'nodejs';
-export const maxDuration = 120;
+// PDF 발췌 1회 + 대본 생성 1회. 발췌가 30~60초 걸릴 수 있어 여유.
+export const maxDuration = 240;
 
 interface GenerateScriptBody {
   topic: string;
@@ -55,20 +57,40 @@ export async function POST(request: NextRequest) {
   }
 
   try {
+    // PDF 본문이 있으면 먼저 주제 관련 부분만 발췌해서 reference로 쓴다.
+    // 같은 책 + 다른 주제일 때 책 전체를 그대로 박으면 주제 변별력이 묻혀
+    // 결과가 비슷해지는 문제를 막기 위함.
+    let pdfExcerpt: string | undefined;
+    if (pdfText) {
+      try {
+        const ex = await summarizeForTopic({
+          pdfText,
+          topic,
+          maxChars: 3_000,
+        });
+        if (ex && ex.trim()) pdfExcerpt = ex.trim();
+      } catch (err) {
+        // 발췌 실패는 치명적이지 않음 — 원본 그대로 fallback
+        console.warn('summarizeForTopic 실패, 원본 pdfText 사용:', err);
+        pdfExcerpt = pdfText;
+      }
+    }
+
     const { system, user } = buildPrompt({
       topic,
       mode,
       parentGender,
       targetMinutes,
-      pdfText,
+      pdfText: pdfExcerpt,
       research,
     });
-    const script = await generate({ system, user, maxTokens: 4096, temperature: 0.9 });
+    const script = await generate({ system, user, maxTokens: 4096 });
     return Response.json({
       script,
       mode,
       targetMinutes,
       usedPdf: Boolean(pdfText),
+      usedPdfExcerpt: Boolean(pdfExcerpt && pdfExcerpt !== pdfText),
       usedResearch: Boolean(research),
     });
   } catch (err) {
