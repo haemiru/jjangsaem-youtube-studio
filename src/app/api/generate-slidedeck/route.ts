@@ -13,7 +13,8 @@ import { convertPdfToPngs } from '@/lib/pdf-to-png';
 export const runtime = 'nodejs';
 // 슬라이드 생성은 NotebookLM 측에서 10~15분까지도 걸린다.
 // + PDF 다운로드 + PNG 변환 여유 포함.
-export const maxDuration = 900;
+// Vercel Pro 플랜 상한이 800초이므로 그 안에서 가능한 한 길게 잡는다.
+export const maxDuration = 800;
 
 const SAFE_JOB_ID = /^[A-Za-z0-9_-]+$/;
 const SAFE_NOTEBOOK_ID = /^[0-9a-fA-F-]{20,}$/;
