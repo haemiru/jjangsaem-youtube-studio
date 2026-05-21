@@ -88,6 +88,20 @@ async function runNlm(args: string[], opts: RunOptions = {}): Promise<string> {
         { stderr, stdout }
       );
     }
+    // NotebookLM Studio가 슬라이드/오디오 등 artifact 생성을 거절한 경우.
+    // gRPC code 8(RESOURCE_EXHAUSTED) + UserDisplayableError로 떨어진다.
+    // 주요 원인: focus(custom_instructions)가 너무 김, 노트북 소스가 비어있음/인덱싱 중,
+    // 같은 노트북에 실패한 artifact가 누적, 일시적 쿼터 초과.
+    if (
+      combined.includes('UserDisplayableError') ||
+      combined.includes('Studio create failed')
+    ) {
+      throw new NotebookLMError(
+        'cli_error',
+        'NotebookLM이 슬라이드 덱 생성을 거절했습니다. 가능한 원인: ① 주제(focus) 텍스트가 너무 김 → 200자 내외로 줄여보세요. ② 노트북에 소스가 없거나 아직 인덱싱 중. ③ notebooklm.google.com에서 해당 노트북의 스튜디오 패널에 실패 상태인 슬라이드 덱이 남아있는지 확인 후 삭제하고 재시도. ④ 잠시 뒤 다시 시도.',
+        { stderr, stdout }
+      );
+    }
     throw new NotebookLMError(
       'cli_error',
       apiError

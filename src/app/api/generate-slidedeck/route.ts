@@ -18,9 +18,9 @@ export const maxDuration = 800;
 
 const SAFE_JOB_ID = /^[A-Za-z0-9_-]+$/;
 const SAFE_NOTEBOOK_ID = /^[0-9a-fA-F-]{20,}$/;
-// NotebookLM slide-deck focus(custom_instructions)는 너무 길면 생성이 조용히 실패한다.
-// 500자 정도가 안전한 상한선.
-const FOCUS_MAX_CHARS = 500;
+// NotebookLM slide-deck focus(custom_instructions)는 너무 길면 서버가 UserDisplayableError(code 8)로 거절한다.
+// 실측상 500자도 거절될 때가 있어 300자로 더 보수적으로 잡는다.
+const FOCUS_MAX_CHARS = 300;
 
 interface GenerateSlideDeckBody {
   notebookId: string;
